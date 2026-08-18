@@ -252,6 +252,31 @@ def cmd_scan(args):
         "foreignKeys":  fks,
         "dbQueries":    queries,
     }
+    # Phase 1.5: endpoint request-contract enrichment (on by default, deterministic).
+    # Reads each controller for the REAL request fields + validation rules it enforces,
+    # fixing the static table-column guess (e.g. POST /queries wants name+email+message,
+    # not the queries-table columns). Additive: annotates nodes, never overrides facts.
+    if getattr(args, 'enrich_contracts', True):
+        try:
+            from endpoint_contracts import build_endpoint_contracts, enrich_graph
+            provider = None
+            if getattr(args, 'enrich_contracts_ai', False):
+                provider = AIProvider()
+                print(f"{GREEN}[✓] Contract-enrichment AI fallback "
+                      f"{'enabled' if provider.is_enabled() else 'unavailable — parse-only'}{RESET}")
+            contracts = build_endpoint_contracts(export_data, repo_path, provider=provider)
+            stats = enrich_graph(export_data, contracts)
+            export_data["requestContracts"] = list(contracts.values())
+            export_data["summary"]["requestContracts"] = len(contracts)
+            export_data["summary"]["edgeCount"] = len(export_data["edges"])
+            n_parsed = sum(1 for c in contracts.values() if c["origin"] == "parsed")
+            n_ai     = sum(1 for c in contracts.values() if c["origin"] == "ai")
+            print(f"  • {BOLD}Request Contracts{RESET} : {len(contracts)}  "
+                  f"{DIM}({n_parsed} parsed{', ' + str(n_ai) + ' AI-inferred' if n_ai else ''}; "
+                  f"{stats['edges_added']} READS_FIELD edges){RESET}")
+        except Exception as e:
+            print(f"{YELLOW}[!] Contract enrichment failed (graph still valid): {e}{RESET}")
+
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(export_data, f, indent=2)
 
@@ -1190,6 +1215,9 @@ Examples:
     sp.add_argument("--page-docs",  nargs="?", const="./page_docs", help="Phase 0: write a per-page Markdown dossier (fields, APIs, DB, connectivity, use-cases, FKs) + a data-model audit into this dir (default ./page_docs) — the RAG corpus for test generation")
     sp.add_argument("--page-docs-ai", action="store_true", help="With --page-docs, use AI (multi-loop) to infer missing fields, write use-cases, and flag missing FKs / normalization")
     sp.add_argument("--page-docs-limit", type=int, help="Limit page-docs to the N pages with the most fields (for a quick/cheap pass)")
+    sp.add_argument("--no-enrich-contracts", dest="enrich_contracts", action="store_false", help="Phase 1.5: skip endpoint request-contract enrichment (on by default — reads each controller for its real request fields + validation rules)")
+    sp.set_defaults(enrich_contracts=True)
+    sp.add_argument("--enrich-contracts-ai", action="store_true", help="With contract enrichment, let AI infer request fields for controllers that parsing couldn't read (grounded + verified against source; parsed facts are never overridden)")
 
     # ── test ──────────────────────────────────────────────────────────────────
     tp = sub.add_parser("test", help="Generate & execute tests against a live ERP system")

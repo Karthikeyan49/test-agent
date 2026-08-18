@@ -144,9 +144,29 @@ def _with_id_var(path: str) -> str:
     return _ID_PARAM.sub("${id}", path or "", count=1)
 
 
-def _field_value(field_name: str) -> Any:
-    """Best-effort valid value for a UI form field, derived from its name
-    (page fields in this graph carry no richer type info than 'text')."""
+def _field_value(field_name: str, spec: Optional[Dict[str, Any]] = None) -> Any:
+    """Best-effort VALID value for a field. When a request-contract `spec`
+    (type + validation rules, recovered by endpoint_contracts.py) is available,
+    honor it — a real email for `email`, an enum member for `in:`, a number
+    within `min:`, a string trimmed to `max:` — so generated request bodies
+    satisfy the controller instead of guessing from the field name."""
+    if spec:
+        t = spec.get("type")
+        if t == "email":
+            return "valid@test.com"
+        if t == "enum" and spec.get("enum"):
+            return spec["enum"][0]
+        if t == "number":
+            return spec.get("minValue", 1) or 1
+        if t == "bool":
+            return True
+        if t == "date":
+            return "2026-01-01"
+        # typed text (or unspecified) — fit the max length if the rule gave one
+        base = "Test" + re.sub(r'[^A-Za-z0-9]', '', spec.get("name") or field_name or "")[:12]
+        base = base or "TestValue"
+        mx = spec.get("maxLength")
+        return base[:mx] if isinstance(mx, int) and mx > 0 else base
     name = field_name or ""
     if _EMAIL_NAME.search(name):
         return "valid@test.com"
@@ -158,6 +178,17 @@ def _field_value(field_name: str) -> Any:
         return 5
     base = "Test" + re.sub(r'[^A-Za-z0-9]', '', name)[:12]
     return base or "TestValue"
+
+
+def _contracts_by_key(graph_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Index request contracts (from Phase 1.5 enrichment) by 'METHOD /path'
+    with the path param collapsed, so a scenario can look up the REAL request
+    fields an endpoint reads. Empty when the graph wasn't enriched."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for c in graph_data.get("requestContracts", []) or []:
+        key = f"{(c.get('method') or '').upper()} {_normalize_path(c.get('path') or '')}"
+        out[key] = c
+    return out
 
 
 def _dedupe_pages(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -182,6 +213,7 @@ def _crud_lifecycle_scenarios(graph_data: Dict[str, Any],
                               tname_by_id: Dict[str, str],
                               out: Dict[Tuple[str, str], List[str]]) -> List[Dict[str, Any]]:
     endpoints = graph_data.get("apiEndpoints", []) or []
+    contracts_by_key = _contracts_by_key(graph_data)
     ep_by_mp: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for ep in endpoints:
         m = (ep.get("method") or "").upper()
@@ -208,7 +240,17 @@ def _crud_lifecycle_scenarios(graph_data: Dict[str, Any],
         seen_tables.add(table)
         idx += 1
         pk = _pk_column(cols, table)
-        body = {c["name"]: _valid_value(c) for c in writable}
+
+        # REQUEST BODY: prefer the endpoint's real request contract (Phase 1.5) —
+        # the fields the controller actually reads + their validation rules — over
+        # the table's columns. Fixes e.g. POST /queries wanting {name,email,message}
+        # instead of the queries-table columns (user_id, query_number, status, …).
+        # The DB assertion below still verifies the row in `table`, unchanged.
+        contract = contracts_by_key.get(f"POST {_normalize_path(path)}")
+        if contract and contract.get("fields"):
+            body = {f["name"]: _field_value(f["name"], f) for f in contract["fields"]}
+        else:
+            body = {c["name"]: _valid_value(c) for c in writable}
 
         id_path_norm = _normalize_path(path.rstrip('/') + '/{id}')
         get_list_ep   = ep_by_mp.get(("GET", _normalize_path(path)))
@@ -327,6 +369,7 @@ def _use_case_flow_scenarios(graph_data: Dict[str, Any],
             navigates_to.setdefault(e.get("source"), []).append(e.get("target"))
 
     post_by_lastseg = _post_endpoint_index(endpoints)
+    contracts_by_key = _contracts_by_key(graph_data)
 
     scenarios: List[Dict[str, Any]] = []
     idx = 0
@@ -345,6 +388,11 @@ def _use_case_flow_scenarios(graph_data: Dict[str, Any],
         cols = cols_by_name.get(_norm(table)) or []
         pk = _pk_column(cols, table)
 
+        # Prefer the endpoint's REAL request contract (Phase 1.5) over UI-field guesses.
+        method0 = (ep.get("method") or "POST").upper()
+        contract = contracts_by_key.get(f"{method0} {_normalize_path(ep.get('path') or '')}")
+        contract_specs = {f["name"]: f for f in (contract.get("fields") if contract else [])}
+
         idx += 1
         n = 1
         steps: List[Dict[str, Any]] = [
@@ -358,11 +406,18 @@ def _use_case_flow_scenarios(graph_data: Dict[str, Any],
             fname = f.get("fieldName")
             if not fname:
                 continue
-            val = _field_value(fname)
+            val = _field_value(fname, contract_specs.get(fname))
             body[fname] = val
             steps.append(make_step(n, "ui", "fill", page=page.get("name"), field=fname, value=val,
                                     expect=f"'{fname}' accepts the entered value"))
             n += 1
+
+        # The controller may read fields the UI form doesn't expose (or names them
+        # differently). Fold in the contract's REQUIRED fields so the API create
+        # step sends a body the endpoint actually accepts.
+        for cname, spec in contract_specs.items():
+            if spec.get("required") and cname not in body:
+                body[cname] = _field_value(cname, spec)
 
         steps.append(make_step(n, "ui", "submit", page=page.get("name"), selector="button[type=submit]",
                                 expect="the form submits"))
@@ -675,8 +730,15 @@ def generate_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dict[st
 if __name__ == "__main__":
     import os
 
-    GRAPH_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "test-ecosudar", "system_graph.json")
-    GRAPH_PATH = os.path.abspath(GRAPH_PATH)
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _root = os.path.dirname(_here)
+    _candidates = [
+        os.path.join(_root, "graph.json"),
+        os.path.join(_root, "system_graph.json"),
+        os.path.join(_root, "test-ecosudar", "system_graph.json"),
+        os.path.join(os.path.dirname(_root), "test-ecosudar", "system_graph.json"),
+    ]
+    GRAPH_PATH = next((p for p in _candidates if os.path.isfile(p)), _candidates[0])
     with open(GRAPH_PATH, "r") as fh:
         graph = json.load(fh)
 

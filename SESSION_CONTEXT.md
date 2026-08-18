@@ -58,6 +58,7 @@ testing-agent/
 |---|---|---|
 | **0** Page docs (planned) | per-page `.md` + data-model audit → RAG memory | yes |
 | **1** Build the map | `python3 cli.py scan --path test-ecosudar --output graph.json` | no |
+| **1.5** Enrich contracts | reads each controller for its REAL request fields + validation rules (on by default; `--no-enrich-contracts`, `--enrich-contracts-ai`) | opt (fallback) |
 | **2** Preview tests | `python3 cli.py test --graph graph.json --no-browser` | no |
 | **3** Start target | `cd test-ecosudar/deploy && docker compose up -d` | no |
 | **4** Run tests | `python3 cli.py test --graph graph.json --base-url http://localhost:8080 --db mysql --seed-db` | no |
@@ -80,7 +81,7 @@ testing-agent/
 - **Scenarios**: 166 generated (CRUD + use-case + cross-page); 3-way runner executed all across UI+API+DB and wrote all 4 reports.
 
 ## Honest limits (the remaining work, not missing architecture)
-- Static endpoint→request-contract mapping is imperfect (e.g. `POST /queries` really wants name+email). Closing it needs **HAR request bodies** and/or **parsing controller validation**.
+- ✅ **Static endpoint→request-contract mapping — addressed (Phase 1.5).** `backend/endpoint_contracts.py` reads each controller for the fields it actually reads (`$request->input`/`only`, `$_POST`) + its `Validator::make`/`validate([...])` rules, and annotates every write endpoint with a real `requestContract` (fields + type + required + `max`/`in` rules). On the target: **102 contracts parsed deterministically** — `POST /queries` now correctly resolves to `{name, email, message}` (email + max:100), not the queries-table columns; `PUT /orders/{id}/status` recovers `order_status` as an enum. Additive (never overrides parsed facts); AI is an optional, source-verified fallback only where parsing finds nothing. `scenarios.py` (CRUD + use-case flows) now builds request bodies + typed field values from these contracts. Remaining: **HAR request bodies** would still add real captured journeys + observed field→API links.
 - Role-appropriate auth tokens needed for full-green live runs.
 - shadcn custom components limit browser field coverage (~13–19 of 278 fields map).
 - Business-logic oracle beyond metamorphic is the AI-hard frontier.
