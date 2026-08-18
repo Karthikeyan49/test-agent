@@ -40,6 +40,8 @@ repo_memory.md
 FAILURES.md
 results.json
 report.html
+graph.json
+system_graph.json
 SystemIntel_Report.*
 *_Report.html
 *.har
