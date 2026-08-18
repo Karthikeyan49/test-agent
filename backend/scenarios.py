@@ -542,25 +542,126 @@ def _parse_endpoint_str(s: str) -> Tuple[str, str]:
     return "", s
 
 
+# Rank ordering: creates (POST) are the canonical CRUD target the AI most needs a
+# contract for, then updates (PUT/PATCH); reads/deletes rarely carry a body.
+_METHOD_RANK = {"POST": 0, "PUT": 1, "PATCH": 2, "DELETE": 3, "GET": 4}
+
+
+def _path_depth(path: str) -> int:
+    """Number of literal (non-param) path segments — a proxy for 'top-level
+    resource endpoint' (POST /queries) vs. a deep sub-resource update."""
+    return len([s for s in (path or "").split("/") if s and "{" not in s])
+
+
+def _contract_field_line(contract: Dict[str, Any], max_fields: int = 20) -> str:
+    """Compact 'name:type*, email:email*(max100), status:enum{a|b}' rendering of a
+    request contract's fields (`*` marks required). Bounded per contract so a wide
+    body (POST /auth/register has 14 fields) can't blow up a single summary line."""
+    parts: List[str] = []
+    for f in (contract.get("fields") or [])[:max_fields]:
+        nm = f.get("name")
+        if not nm:
+            continue
+        t = f.get("type") or "text"
+        req = "*" if f.get("required") else ""
+        extra = ""
+        if f.get("enum"):
+            extra = "{" + "|".join(str(x) for x in f["enum"][:6]) + "}"
+        elif isinstance(f.get("maxLength"), int) and f["maxLength"] > 0:
+            extra = f"(max{f['maxLength']})"
+        parts.append(f"{nm}:{t}{req}{extra}")
+    return ", ".join(parts)
+
+
+def _ranked_contracts(graph_data: Dict[str, Any], referenced_keys: set,
+                      max_items: int) -> List[Dict[str, Any]]:
+    """Request contracts (Phase 1.5) ordered by relevance for the AI: endpoints a
+    real use-case references first, then shallow-path creates before deep updates,
+    then alphabetical. Bounded to max_items so a big API (test-ecosudar: 81 tables)
+    can't overflow the context window / trip provider rate limits — see the note in
+    backend/graph_rag.py about the ~12k-char / all-nodes overflow."""
+    contracts = graph_data.get("requestContracts") or []
+
+    def relkey(c: Dict[str, Any]):
+        key = f"{(c.get('method') or '').upper()} {_normalize_path(c.get('path') or '')}"
+        return (0 if key in referenced_keys else 1,
+                _path_depth(c.get("path") or ""),
+                _METHOD_RANK.get((c.get("method") or "").upper(), 9),
+                key)
+
+    return sorted(contracts, key=relkey)[:max_items]
+
+
 def _build_ai_summary(graph_data: Dict[str, Any], repo_memory: Optional[Dict[str, Any]],
                       max_items: int = 40) -> str:
-    if repo_memory:
-        pages = repo_memory.get("pages") or []
-        page_lines = [f"  - {p.get('name')} ({p.get('route')})" for p in pages[:max_items] if p.get("name")]
-        use_cases = repo_memory.get("use_cases") or []
-        uc_lines = [f"  - {u.get('name')}: {u.get('description', '')}" for u in use_cases[:max_items]]
-        parts = ["PAGES:"] + page_lines
-        if uc_lines:
-            parts += ["\nKNOWN USE CASES:"] + uc_lines
-        return "\n".join(parts)
-
-    pages = _dedupe_pages(graph_data.get("pages", []) or [])
+    """Compact, BOUNDED grounding digest for the AI scenario designer. Surfaces the
+    real pages/endpoints/tables the proposal must stay inside, the RAG use-case
+    clusters (page -> connected endpoints/tables), AND each write endpoint's REAL
+    request contract (exact field names + types the controller accepts) so the AI
+    fills bodies with real fields instead of guessing. Every section is capped at
+    max_items to keep the prompt small on large systems."""
     endpoints = graph_data.get("apiEndpoints", []) or []
     tables = graph_data.get("dbTables", []) or []
-    page_lines = [f"  - {p.get('name')} ({p.get('routePath')})" for p in pages[:max_items] if p.get("routePath")]
-    ep_lines = [f"  - {e.get('method')} {e.get('path')}" for e in endpoints[:max_items]]
+    contracts = graph_data.get("requestContracts") or []
+
+    parts: List[str] = []
+    referenced_keys: set = set()
+
+    if repo_memory:
+        # RAG branch: pages carry their form fields; use-case clusters carry the
+        # connected endpoints/tables — the per-page context the AI grounds on.
+        pages = repo_memory.get("pages") or []
+        use_cases = repo_memory.get("use_cases") or []
+        for u in use_cases:
+            for e in (u.get("endpoints") or []):
+                mth, pth = _parse_endpoint_str(e)
+                referenced_keys.add(f"{mth} {_normalize_path(pth)}")
+
+        page_lines = []
+        for p in pages[:max_items]:
+            nm = p.get("name")
+            if not nm:
+                continue
+            flds = p.get("fields") or []
+            fld_str = f" [fields: {', '.join(str(x) for x in flds[:12])}]" if flds else ""
+            page_lines.append(f"  - {nm} ({p.get('route')}){fld_str}")
+        parts += ["PAGES (name (route) [form fields]):"] + page_lines
+
+        uc_lines = []
+        for u in use_cases[:max_items]:
+            eps = ", ".join((u.get("endpoints") or [])[:8]) or "—"
+            tbls = ", ".join((u.get("tables") or [])[:8]) or "—"
+            uc_lines.append(f"  - {u.get('name')}: endpoints=[{eps}]; tables=[{tbls}]")
+        if uc_lines:
+            parts += ["", "KNOWN USE CASES (page cluster -> endpoints/tables):"] + uc_lines
+    else:
+        pages = _dedupe_pages(graph_data.get("pages", []) or [])
+        page_lines = [f"  - {p.get('name')} ({p.get('routePath')})"
+                      for p in pages[:max_items] if p.get("routePath")]
+        parts += ["PAGES:"] + page_lines
+
+    # Real endpoint + table lists — the exact grounding targets the filter checks.
+    ep_lines = [f"  - {(e.get('method') or '').upper()} {e.get('path')}"
+                for e in endpoints[:max_items] if e.get("path")]
+    if ep_lines:
+        parts += ["", "API ENDPOINTS:"] + ep_lines
     table_lines = [f"  - {t.get('name')}" for t in tables[:max_items] if t.get("name")]
-    parts = ["PAGES:"] + page_lines + ["\nAPI ENDPOINTS:"] + ep_lines + ["\nDB TABLES:"] + table_lines
+    if table_lines:
+        parts += ["", "DB TABLES:"] + table_lines
+
+    # REQUEST CONTRACTS — the exact fields + types each write endpoint accepts, so
+    # an AI-proposed body uses REAL field names/types instead of guessing (e.g.
+    # POST /queries wants name/email/message, not the queries-table columns).
+    if contracts:
+        c_lines = []
+        for c in _ranked_contracts(graph_data, referenced_keys, max_items):
+            key = f"{(c.get('method') or '').upper()} {c.get('path')}"
+            line = _contract_field_line(c)
+            if line:
+                c_lines.append(f"  - {key}: {line}")
+        if c_lines:
+            parts += ["", "REQUEST CONTRACTS (fields each endpoint accepts; * = required):"] + c_lines
+
     return "\n".join(parts)
 
 
@@ -606,6 +707,37 @@ def _ai_step_grounded(step: Dict[str, Any], pages_by_name: Dict[str, Any], pages
     return True  # ui fill/select/click/submit/assert_* carry no independently-checkable graph reference
 
 
+def _reconcile_body(endpoint: str, body: Any,
+                    contracts_by_key: Dict[str, Dict[str, Any]]) -> Any:
+    """Reconcile an AI-proposed request body against the endpoint's REAL request
+    contract (Phase 1.5): drop any field the contract does not accept, keep the
+    fields it does (matching by name, case-insensitively for 'clearly the same'),
+    and fill every missing REQUIRED contract field with a valid typed value via
+    `_field_value`. Endpoints with no known contract are returned unchanged — there
+    is nothing to reconcile against, so the AI's body is left intact.
+
+    This keeps AI proposals grounded AND executable: the LLM can never introduce a
+    field the controller rejects, and a required field it forgot is filled in."""
+    method, path = _parse_endpoint_str(endpoint)
+    contract = contracts_by_key.get(f"{method} {_normalize_path(path)}")
+    if not contract or not contract.get("fields"):
+        return body
+    specs = {f["name"]: f for f in contract["fields"] if f.get("name")}
+    by_lower = {k.lower(): k for k in specs}
+    reconciled: Dict[str, Any] = {}
+    if isinstance(body, dict):
+        for k, v in body.items():
+            if k in specs:                                   # exact contract field
+                reconciled[k] = v
+            elif isinstance(k, str) and k.lower() in by_lower:  # same field, other case
+                reconciled[by_lower[k.lower()]] = v
+            # else: the contract does not accept this field -> drop it
+    for name, spec in specs.items():
+        if spec.get("required") and name not in reconciled:
+            reconciled[name] = _field_value(name, spec)
+    return reconciled
+
+
 def _ai_assisted_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dict[str, Any]],
                            provider: Any, max_ai: int) -> List[Dict[str, Any]]:
     if provider is None:
@@ -623,6 +755,7 @@ def _ai_assisted_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dic
         endpoints = graph_data.get("apiEndpoints", []) or []
         real_endpoints = [((e.get("method") or "").upper(), _segments(e.get("path") or "")) for e in endpoints]
         _, name_by_norm = _index_tables(graph_data)
+        contracts_by_key = _contracts_by_key(graph_data)
 
         summary = _build_ai_summary(graph_data, repo_memory)
         system_prompt = (
@@ -676,6 +809,13 @@ def _ai_assisted_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dic
                     all_grounded = False
                     break
                 kw = {k: v for k, v in st.items() if k not in ("layer", "action", "n")}
+                # Contract-reconcile any write-request body so the AI can neither
+                # invent a field the endpoint rejects nor omit a required one.
+                if st.get("layer") == "api" and st.get("action") == "request":
+                    endpoint = kw.get("endpoint") or f"{kw.get('method', '')} {kw.get('path', '')}"
+                    reconciled = _reconcile_body(endpoint, kw.get("body"), contracts_by_key)
+                    if reconciled is not None:
+                        kw["body"] = reconciled
                 grounded_steps.append(make_step(i, st.get("layer", ""), st.get("action", ""), **kw))
             if not all_grounded or not grounded_steps:
                 continue
@@ -703,13 +843,38 @@ def _ai_assisted_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dic
 
 # ── public API ────────────────────────────────────────────────────────────
 
+def _maybe_build_repo_memory(graph_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Build the RAG repo-memory used to GROUND the AI + cross-page generation.
+    Import is guarded (matching page_docs.py's defensive style) so a missing
+    repo_memory module — or any build error — degrades to None, leaving the
+    deterministic path (crud_lifecycle / use_case_flow) fully intact."""
+    try:
+        try:
+            from repo_memory import build_repo_memory
+        except ImportError:  # pragma: no cover - depends on sys.path layout
+            from backend.repo_memory import build_repo_memory  # type: ignore
+    except Exception:
+        return None
+    try:
+        return build_repo_memory(graph_data)
+    except Exception:
+        return None
+
+
 def generate_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dict[str, Any]] = None,
                        provider: Any = None, max_ai: int = 8) -> List[Dict[str, Any]]:
     """Generate professional, multi-step Scenario dicts (scenario_contracts shape)
     from a System Graph. Deterministic categories (crud_lifecycle, use_case_flow,
     cross_page_data) always run; the AI-assisted category only runs when
-    `provider` is given and enabled, and never raises on failure."""
+    `provider` is given and enabled, and never raises on failure.
+
+    RAG grounding: `repo_memory` grounds the cross_page_data + AI categories. When
+    the caller does not supply it (cli.py does), it is built here from the graph so
+    those categories are grounded regardless of entry point. If it can't be built
+    it stays None and only the crud_lifecycle / use_case_flow path runs — unchanged."""
     graph_data = graph_data or {}
+    if repo_memory is None:
+        repo_memory = _maybe_build_repo_memory(graph_data)
     nodes = graph_data.get("nodes", []) or []
     edges = graph_data.get("edges", []) or []
 
@@ -729,6 +894,11 @@ def generate_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dict[st
 
 if __name__ == "__main__":
     import os
+
+    try:
+        from repo_memory import build_repo_memory
+    except ImportError:  # pragma: no cover - depends on sys.path layout
+        from backend.repo_memory import build_repo_memory  # type: ignore
 
     _here = os.path.dirname(os.path.abspath(__file__))
     _root = os.path.dirname(_here)
@@ -809,6 +979,78 @@ if __name__ == "__main__":
         xpg = _cross_page_data_scenarios(graph, rm)
         assert len(xpg) == 1 and validate_scenario(xpg[0]) == [], "cross_page_data generation should work"
         print(f"cross_page_data self-check: generated {len(xpg)} scenario, valid")
+
+    # ── deterministic core is INDEPENDENT of repo_memory (additive law) ──
+    #    provider=None must always yield crud_lifecycle + use_case_flow, and those
+    #    must be byte-identical whether or not the RAG memory is supplied/built.
+    assert by_cat.get("crud_lifecycle", 0) > 0 and by_cat.get("use_case_flow", 0) > 0
+    det_only = [s["id"] for s in scenarios if s["category"] in ("crud_lifecycle", "use_case_flow")]
+    with_rm = generate_scenarios(graph, repo_memory=build_repo_memory(graph), provider=None)
+    det_with_rm = [s["id"] for s in with_rm if s["category"] in ("crud_lifecycle", "use_case_flow")]
+    assert det_only == det_with_rm, \
+        "crud_lifecycle / use_case_flow must be identical with or without repo_memory"
+    print(f"deterministic-core stability: {len(det_only)} crud/use_case scenarios "
+          f"identical with and without repo_memory")
+
+    # ── enriched AI summary must surface real REQUEST CONTRACTS ──
+    rm_full = build_repo_memory(graph)
+    summary = _build_ai_summary(graph, rm_full)
+    assert "POST /queries" in summary, "AI summary is missing the POST /queries endpoint"
+    assert ("name:text" in summary and "email:email" in summary and "message:text" in summary), \
+        "AI summary must surface the POST /queries request-contract fields name/email/message"
+    print("summary self-check: REQUEST CONTRACTS surfaces POST /queries -> name/email/message")
+
+    # ── AI path exercised deterministically via a fake provider (no network) ──
+    #    Mirrors backend/explorer.py's stub. One grounded scenario whose POST
+    #    /queries body VIOLATES the contract (extra hacker_field/is_admin, missing
+    #    required 'message'); two ungrounded scenarios (fake endpoint, fake table)
+    #    the grounding filter must reject outright.
+    class _StubProvider:
+        def is_enabled(self):
+            return True
+
+        def _call_llm(self, prompt, system_prompt=""):
+            return json.dumps([
+                {"name": "Submit a customer query end-to-end", "category": "use_case_flow",
+                 "risk": "the public query form must persist to the DB",
+                 "steps": [
+                     {"layer": "ui", "action": "navigate", "page": "Queries", "route": "/queries"},
+                     {"layer": "api", "action": "request", "method": "POST", "endpoint": "POST /queries",
+                      "body": {"name": "Jane", "email": "jane@example.com",
+                               "hacker_field": "'; DROP TABLE queries; --", "is_admin": True},
+                      "expectStatusClass": "2xx", "store": {"id": "data.id"}},
+                     {"layer": "db", "action": "query_exists", "table": "queries", "column": "id", "value": "${id}"},
+                 ]},
+                {"name": "Poke a hallucinated endpoint", "category": "crud_lifecycle",
+                 "steps": [
+                     {"layer": "api", "action": "request", "method": "POST",
+                      "endpoint": "POST /totally-made-up", "body": {"x": 1}, "expectStatusClass": "2xx"},
+                 ]},
+                {"name": "Read a hallucinated table", "category": "crud_lifecycle",
+                 "steps": [
+                     {"layer": "ui", "action": "navigate", "page": "Queries", "route": "/queries"},
+                     {"layer": "db", "action": "query_exists", "table": "nonexistent_table",
+                      "column": "id", "value": "1"},
+                 ]},
+            ])
+
+    ai = _ai_assisted_scenarios(graph, rm_full, _StubProvider(), max_ai=8)
+    ai_names = {s["name"] for s in ai}
+    assert len(ai) == 1, f"expected exactly 1 grounded AI scenario, got {len(ai)}: {sorted(ai_names)}"
+    assert "Poke a hallucinated endpoint" not in ai_names, "grounding must reject the fake endpoint"
+    assert "Read a hallucinated table" not in ai_names, "grounding must reject the fake table"
+    surv = ai[0]
+    assert surv["source"] == "ai" and validate_scenario(surv) == [], "surviving AI scenario must be valid"
+    api_step = next(st for st in surv["steps"] if st["layer"] == "api" and st.get("action") == "request")
+    rec_body = api_step.get("body") or {}
+    assert "hacker_field" not in rec_body and "is_admin" not in rec_body, \
+        f"contract-violating fields not dropped: {sorted(rec_body)}"
+    assert "message" in rec_body, f"required contract field 'message' not filled: {sorted(rec_body)}"
+    assert set(rec_body) == {"name", "email", "message"}, \
+        f"reconciled body must match the POST /queries contract exactly: {sorted(rec_body)}"
+    print(f"AI-path self-check: 1 grounded scenario survived, 2 ungrounded rejected; "
+          f"POST /queries body reconciled to {sorted(rec_body)} "
+          f"(dropped hacker_field/is_admin, filled required message)")
 
     print(f"\ntotal scenarios: {len(scenarios)}")
     for cat in SCENARIO_CATEGORIES:

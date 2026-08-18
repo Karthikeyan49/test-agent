@@ -667,6 +667,24 @@ def cmd_test(args):
     except Exception as e:
         print(f"{YELLOW}[!] Invariant generation failed: {e}{RESET}")
 
+    # Contract-driven black-box negatives (Phase 1.5): for each endpoint's REAL
+    # request contract, one single-fault case per validation rule (missing-required,
+    # bad-email, over-max, out-of-enum, wrong-type) asserting a 4xx, plus a valid
+    # happy-path. Always-on and precise (no table-column guessing) — needs the
+    # requestContracts the scan wrote into the graph.
+    try:
+        from field_blackbox import generate_contract_negative_tests
+        cn_graph = _loaded if (_loaded and _loaded.get("requestContracts")) else {
+            "requestContracts": (analysis.get("requestContracts", []) if isinstance(analysis, dict) else [])}
+        cn_tests = generate_contract_negative_tests(cn_graph)
+        if cn_tests:
+            neg = sum(1 for t in cn_tests if (t.get("assertions") or [{}])[0].get("expectedStatusClass") == "4xx")
+            print(f"{GREEN}[✓] + {len(cn_tests)} contract black-box test(s) — "
+                  f"{neg} rule-violation negatives + {len(cn_tests)-neg} happy-path{RESET}")
+        test_cases += cn_tests
+    except Exception as e:
+        print(f"{YELLOW}[!] Contract-negative generation failed: {e}{RESET}")
+
     # Per-field black-box DEPTH — every writable field × the full method battery
     # (required, type, format, length, enum, boundary/negative, injection). Opt-in
     # (--field-blackbox) because it multiplies the case count. Schema-driven,

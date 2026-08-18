@@ -545,8 +545,20 @@ class RepoMemoryIndex:
 
 # ── Self-test ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    GRAPH_PATH = "/home/karthikeyan/vscode/test-ecosudar/system_graph.json"
-    OUT_MD = "/tmp/claude-1000/-home-karthikeyan-vscode-testing-agent/13975b0d-c753-4016-b6ff-b27fae438ea6/scratchpad/repo_memory.md"
+    import tempfile
+
+    # Resolve the graph at the repo root (graph.json), mirroring scenarios.py, so
+    # the self-test runs offline from a fresh checkout with no hardcoded paths.
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _root = os.path.dirname(_here)
+    _candidates = [
+        os.path.join(_root, "graph.json"),
+        os.path.join(_root, "system_graph.json"),
+        os.path.join(_root, "test-ecosudar", "system_graph.json"),
+        os.path.join(os.path.dirname(_root), "test-ecosudar", "system_graph.json"),
+    ]
+    GRAPH_PATH = next((p for p in _candidates if os.path.isfile(p)), _candidates[0])
+    OUT_MD = os.path.join(tempfile.mkdtemp(prefix="repo_memory_"), "repo_memory.md")
 
     with open(GRAPH_PATH, "r", encoding="utf-8") as fh:
         graph = json.load(fh)
@@ -566,6 +578,11 @@ if __name__ == "__main__":
     assert n_pages > 100 or n_pages_with_fields > 0, "expected >100 pages or some pages with fields"
     assert n_connections > 0, "expected at least one connection"
     assert n_cross_page > 0, "expected at least one cross_page entry"
+
+    # A use-case wired to BOTH endpoints and tables is what grounds the AI summary
+    # (scenarios._build_ai_summary renders 'page cluster -> endpoints/tables').
+    assert any(u.get("endpoints") and u.get("tables") for u in memory["use_cases"]), \
+        "expected at least one use-case wired to both endpoints and tables"
 
     errs = validate_repo_memory(memory)
     assert errs == [], f"validate_repo_memory failed: {errs}"
