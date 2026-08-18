@@ -65,6 +65,16 @@ testing-agent/
 | **5** Report | `--format junit|html|json` + exit codes | no |
 | **6** Deep modes | `--field-blackbox` · `--scenarios [--scenarios-ai]` · `--mutate FILES` · `--explore` | some |
 
+**Contract-driven testing (built on Phase 1.5):** the default `test` suite now emits
+**contract black-box tests** — for each endpoint's real request contract, one single-fault
+negative per validation rule (missing-required / bad-email / over-max / out-of-enum /
+wrong-type → assert 4xx) plus a valid happy-path (assert !4xx). On the target: **+183**
+(81 negatives + 102 happy-path), offline preview 1489→1672. `field_blackbox.generate_contract_negative_tests()`.
+**Contract-grounded RAG scenarios:** `scenarios.py` AI path is grounded on repo-memory RAG +
+request contracts — `_build_ai_summary` surfaces each endpoint's accepted fields so AI proposes
+contract-accurate bodies, and `_reconcile_body` drops fields a contract rejects / fills missing
+required ones. Deterministic scenarios (crud/use_case/cross_page) unchanged; AI still never judges.
+
 ## Test-ecosudar stack (the live target)
 - **Stack**: `test-ecosudar/deploy/docker-compose.yml` → MariaDB 11 (dump auto-imported) + PHP 8.2/Apache.
 - **URLs**: API `http://localhost:8080`, DB `127.0.0.1:3307` (db/`ecosudar`/`ecosudar`), frontend `cd eco-sudar-control && npx vite preview --port 5173`.
