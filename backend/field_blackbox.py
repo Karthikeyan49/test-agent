@@ -266,6 +266,181 @@ def generate_field_blackbox_tests(graph_data: Dict[str, Any],
     return tests
 
 
+# ── Contract-rule-driven black-box NEGATIVE generation ────────────────────────
+# generate_field_blackbox_tests derives a field's domain from the SQL *schema*.
+# This sibling derives it from the CONTROLLER's own declared *validation rules*
+# — the request contracts that backend/endpoint_contracts.py (Phase 1.5) parsed
+# onto the graph under "requestContracts". Those rules are the endpoint's own
+# statement of what it accepts, so a value that violates a rule SHOULD be rejected.
+#
+# For each contract it builds one all-valid baseline body and, per field, emits a
+# single-fault negative for every rule that field carries (single-fault isolation:
+# exactly one field is made bad, every other required field stays valid — so a 2xx
+# means precisely that one rule is unenforced, i.e. a real missing-validation bug):
+#
+#     • required  omit a required field                       → expect 4xx
+#     • type      non-numeric text into a number field        → expect 4xx
+#     • format    non-email string into an email field        → expect 4xx
+#     • length    maxLength=N given N+1 chars                  → expect 4xx
+#     • range     numeric minValue=N given N-1                 → expect 4xx
+#     • enum      value outside a declared enum set            → expect 4xx
+#
+# Plus ONE positive happy-path per contract (all-valid body) that must NOT be
+# 4xx-rejected — expressed with this file's own "!<class>" convention as "!4xx".
+# testData keys are always a subset of the contract's declared field names (they
+# are built only from those fields), so no table columns ever leak in.
+
+_CONTRACT_BAD_EMAIL  = "not-an-email"
+_CONTRACT_BAD_ENUM   = "__not_a_valid_enum__"
+_CONTRACT_BAD_NUMBER = "NaN_text"
+
+
+def _is_real_number(v: Any) -> bool:
+    """int/float but not bool (bool is an int subclass in Python)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _contract_valid_value(field: Dict[str, Any]) -> Any:
+    """A contract-valid value for a field, from its declared type/constraints.
+    Used to build the all-valid baseline body onto which one fault is then applied."""
+    ftype = str(field.get("type") or "text").lower()
+    name  = str(field.get("name") or "")
+    if ftype == "email":
+        return "valid@test.com"
+    if ftype == "number":
+        mv = field.get("minValue")
+        return mv if _is_real_number(mv) else 5          # minValue itself satisfies min:N
+    if ftype == "bool":
+        return True
+    if ftype == "date":
+        return "2026-01-01"
+    if ftype == "enum":
+        enum = field.get("enum") or []
+        return enum[0] if enum else "valid"              # first declared member when known
+    # text (default): a string within maxLength and at/above any min-length (minValue)
+    ml = field.get("maxLength")
+    mn = field.get("minValue")
+    s = ("Valid" + re.sub(r'[^A-Za-z0-9]', '', name).title()) or "ValidValue"
+    if _is_real_number(mn) and len(s) < int(mn):
+        s = s + "x" * (int(mn) - len(s))                 # pad up to the declared min length
+    if _is_real_number(ml) and int(ml) > 0 and len(s) > int(ml):
+        s = s[:int(ml)]                                  # clamp down to the declared max length
+    return s
+
+
+def generate_contract_negative_tests(graph_data: Dict[str, Any],
+                                     max_cases: int = 4000) -> List[Dict[str, Any]]:
+    """Emit contract-rule-driven single-fault NEGATIVE tests (+ one positive per
+    contract) from graph_data["requestContracts"]. Additive sibling of
+    generate_field_blackbox_tests; ids are prefixed FBC-#### to distinguish them."""
+    contracts = graph_data.get("requestContracts", []) or []
+    if not contracts:
+        return []
+
+    tests: List[Dict[str, Any]] = []
+    n = [0]
+
+    def add(endpoint, method, fname, case, body, status_expect, note, file, line, conf):
+        n[0] += 1
+        a = {"type": "API", "method": method, "endpoint": endpoint}
+        a.update(status_expect)   # expectedStatusClass: "4xx" (negative) / "!4xx" (positive)
+        tests.append({
+            "id":         f"FBC-{n[0]:04d}",
+            "title":      f"[Contract-{case}] {endpoint} · {fname} — {note}",
+            "category":   "Per-field black-box",
+            "technique":  "BLACK_BOX_CONTRACT",
+            "subtype":    case,
+            "priority":   "medium",
+            "confidence": conf,
+            "status":     "CONFIRMED",
+            "steps":      [],
+            "testData":   body,
+            "assertions": [a],
+            "sourceEvidence": [{"endpoint": endpoint, "field": fname, "case": case,
+                                "file": file, "line": line}],
+        })
+
+    C4  = {"expectedStatusClass": "4xx"}    # negative: bad value must be rejected
+    NO4 = {"expectedStatusClass": "!4xx"}   # positive: valid body must not be 4xx-rejected
+
+    for c in contracts:
+        method   = (c.get("method") or "").upper()
+        endpoint = c.get("endpoint") or f"{method} {c.get('path', '')}".strip()
+        file     = c.get("file")
+        line     = c.get("line")
+        conf     = c.get("confidence", 0.9)
+        fields   = c.get("fields", []) or []
+        named    = [f for f in fields if f.get("name")]
+        if not named:
+            continue
+
+        # All-valid baseline body: every declared field at a contract-valid value.
+        baseline = {f["name"]: _contract_valid_value(f) for f in named}
+
+        for f in named:
+            fname = f["name"]
+            ftype = str(f.get("type") or "text").lower()
+            ml    = f.get("maxLength")
+            mn    = f.get("minValue")
+            enum  = f.get("enum") or []
+
+            # required → omit the field entirely
+            if f.get("required"):
+                b = dict(baseline); b.pop(fname, None)
+                add(endpoint, method, fname, "required", b, C4,
+                    "omitting required field is rejected", file, line, conf)
+                if n[0] >= max_cases:
+                    return tests
+
+            # type → numeric field given non-numeric text
+            if ftype == "number":
+                b = dict(baseline); b[fname] = _CONTRACT_BAD_NUMBER
+                add(endpoint, method, fname, "type", b, C4,
+                    "non-numeric value in numeric field is rejected", file, line, conf)
+                if n[0] >= max_cases:
+                    return tests
+
+            # format → email field given a non-email string
+            if ftype == "email":
+                b = dict(baseline); b[fname] = _CONTRACT_BAD_EMAIL
+                add(endpoint, method, fname, "format", b, C4,
+                    "malformed email is rejected", file, line, conf)
+                if n[0] >= max_cases:
+                    return tests
+
+            # length → maxLength=N given N+1 chars
+            if _is_real_number(ml) and int(ml) > 0:
+                b = dict(baseline); b[fname] = "A" * (int(ml) + 1)
+                add(endpoint, method, fname, "length", b, C4,
+                    f"over-length (>{int(ml)}) value is rejected", file, line, conf)
+                if n[0] >= max_cases:
+                    return tests
+
+            # range → numeric minValue=N given N-1
+            if ftype == "number" and _is_real_number(mn):
+                b = dict(baseline); b[fname] = mn - 1
+                add(endpoint, method, fname, "range", b, C4,
+                    f"below-minimum (<{mn}) value is rejected", file, line, conf)
+                if n[0] >= max_cases:
+                    return tests
+
+            # enum → value outside the declared set (only when the set is known)
+            if ftype == "enum" and enum:
+                b = dict(baseline); b[fname] = _CONTRACT_BAD_ENUM
+                add(endpoint, method, fname, "enum", b, C4,
+                    "value outside declared enum is rejected", file, line, conf)
+                if n[0] >= max_cases:
+                    return tests
+
+        # one positive happy-path per contract: an all-valid body must not be 4xx
+        add(endpoint, method, "*", "positive", dict(baseline), NO4,
+            "valid happy-path body is accepted (not 4xx)", file, line, conf)
+        if n[0] >= max_cases:
+            return tests
+
+    return tests
+
+
 if __name__ == "__main__":
     graph = {
         "apiEndpoints": [{"id": "api_ep_POST__vendors", "method": "POST", "path": "/vendors",
@@ -311,4 +486,72 @@ if __name__ == "__main__":
             assert exp == "!5xx"
         else:
             assert exp == "4xx", f"{t['subtype']} should expect 4xx"
+
+    # ── contract-rule-driven negative generation (generate_contract_negative_tests) ──
+    import json, os
+    _GRAPH_PATH = "/home/user/test-agent/graph.json"
+    if os.path.exists(_GRAPH_PATH):
+        with open(_GRAPH_PATH) as _fh:
+            cgraph = json.load(_fh)
+    else:  # self-contained fallback so the self-test runs without the graph file
+        cgraph = {"requestContracts": [{
+            "endpoint": "POST /queries", "method": "POST", "path": "/queries",
+            "controller": "QueryController", "action": "store",
+            "file": "/abs/QueryController.php", "line": 10, "confidence": 0.95,
+            "fields": [
+                {"name": "name",    "type": "text",  "required": True,
+                 "rules": ["required", "string", "max:100"], "maxLength": 100},
+                {"name": "email",   "type": "email", "required": True,
+                 "rules": ["required", "email", "max:100"], "maxLength": 100},
+                {"name": "message", "type": "text",  "required": True,
+                 "rules": ["required", "string"]},
+            ],
+        }]}
+
+    cneg = generate_contract_negative_tests(cgraph)
+    assert cneg, "contract negative generation produced no tests"
+
+    fields_by_ep = {c["endpoint"]: {f["name"] for f in c.get("fields", []) if f.get("name")}
+                    for c in cgraph.get("requestContracts", [])}
+
+    q = [t for t in cneg if t["assertions"][0]["endpoint"] == "POST /queries"]
+    assert q, "no POST /queries contract tests generated"
+
+    # a required case that omits `name`
+    q_req_name = [t for t in q if t["subtype"] == "required"
+                  and t["sourceEvidence"][0]["field"] == "name"]
+    assert q_req_name, "missing POST /queries required-name negative"
+    assert "name" not in q_req_name[0]["testData"], "required case must omit the field"
+
+    # a format case with an invalid email
+    q_fmt = [t for t in q if t["subtype"] == "format"
+             and t["sourceEvidence"][0]["field"] == "email"]
+    assert q_fmt, "missing POST /queries email format negative"
+    assert q_fmt[0]["testData"]["email"] == "not-an-email", "format case must send a non-email"
+
+    # a length case where `name` exceeds its 100-char max
+    q_len = [t for t in q if t["subtype"] == "length"
+             and t["sourceEvidence"][0]["field"] == "name"]
+    assert q_len, "missing POST /queries name length negative"
+    assert len(q_len[0]["testData"]["name"]) == 101, "length case must exceed maxLength(100) by one"
+
+    # every negative asserts 4xx; every positive asserts non-4xx (this file's "!4xx")
+    for t in cneg:
+        exp = t["assertions"][0].get("expectedStatusClass")
+        if t["subtype"] == "positive":
+            assert exp == "!4xx", "positive happy-path must assert non-4xx"
+        else:
+            assert exp == "4xx", f"contract negative {t['subtype']} must assert 4xx"
+
+    # testData keys never leak beyond the contract's own declared field names
+    for t in cneg:
+        allowed = fields_by_ep.get(t["assertions"][0]["endpoint"], set())
+        leaked = set(t["testData"].keys()) - allowed
+        assert not leaked, f"{t['id']} leaked non-contract keys: {leaked}"
+
+    _cn = [t for t in cneg if t["subtype"] != "positive"]
+    _cp = [t for t in cneg if t["subtype"] == "positive"]
+    print(f"contract tests: {len(_cn)} negative + {len(_cp)} positive "
+          f"from {len(cgraph.get('requestContracts', []))} contracts")
+
     print("SELF-TEST PASS")
