@@ -1,0 +1,152 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-ink: #0f1729;
+    --color-ink-deep: #0f1729;
+    --color-sky: #2ea0da;
+    --color-sky-dark: #1f7fb3;
+    --color-sky-light: #6cc3ec;
+    --color-flare: #ff1f5a;
+    --color-surface: #ffffff;
+    --color-surface-tint: #f3f8fc;
+    --color-muted: #f8fafc;
+
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 200 70% 52%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 200 45% 96%;
+    --secondary-foreground: 200 70% 40%;
+
+    --muted: 210 20% 96%;
+    --muted-foreground: 215 15% 50%;
+
+    --accent: 200 45% 96%;
+    --accent-foreground: 200 70% 40%;
+
+    --destructive: 344 100% 56%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 20% 90%;
+    --input: 214 20% 90%;
+    --ring: 200 70% 52%;
+
+    --radius: 0.75rem;
+
+    --sidebar-bg: 204 56% 97%;
+    --sidebar-fg: 222 47% 11%;
+    --sidebar-active: 200 70% 52%;
+    --sidebar-hover: 200 45% 92%;
+
+    --status-delivered: 152 60% 40%;
+    --status-processing: 45 90% 50%;
+    --status-shipped: 210 70% 55%;
+    --status-pending: 220 10% 60%;
+    --status-confirmed: 240 60% 55%;
+    --status-out-for-delivery: 30 90% 52%;
+    --status-cancelled: 0 72% 51%;
+    --status-returned: 280 55% 52%;
+
+    --sidebar-background: 204 56% 97%;
+    --sidebar-foreground: 222 47% 11%;
+    --sidebar-primary: 200 70% 52%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-primary-icon: 0 0% 100%;
+    --sidebar-muted: 215 15% 50%;
+    --sidebar-accent: 200 45% 92%;
+    --sidebar-accent-foreground: 200 70% 36%;
+    --sidebar-border: 204 35% 88%;
+    --sidebar-ring: 200 70% 52%;
+
+    --brand-ink: 220 44% 12%;
+    --brand-ink-foreground: 210 25% 86%;
+  }
+
+  .dark {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+    --card: 222 40% 14%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222 40% 14%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 200 70% 52%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 217 33% 20%;
+    --secondary-foreground: 200 85% 72%;
+    --muted: 217 33% 18%;
+    --muted-foreground: 215 20% 68%;
+    --accent: 217 33% 20%;
+    --accent-foreground: 200 85% 72%;
+    --destructive: 344 100% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 217 28% 24%;
+    --input: 217 28% 24%;
+    --ring: 200 70% 52%;
+    --sidebar-bg: 222 47% 9%;
+    --sidebar-fg: 210 40% 98%;
+    --sidebar-active: 200 70% 52%;
+    --sidebar-hover: 217 33% 20%;
+    --sidebar-background: 222 47% 9%;
+    --sidebar-foreground: 210 40% 98%;
+    --sidebar-primary: 200 70% 52%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-primary-icon: 0 0% 100%;
+    --sidebar-muted: 215 15% 50%;
+    --sidebar-accent: 217 33% 20%;
+    --sidebar-accent-foreground: 200 85% 72%;
+    --sidebar-border: 217 28% 24%;
+    --sidebar-ring: 200 70% 52%;
+
+    --brand-ink: 222 47% 8%;
+    --brand-ink-foreground: 210 40% 92%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-family: 'Inter', sans-serif;
+  }
+}
+
+/* Floating scrollbar bar — webkit custom thumb */
+.eco-float-scroll::-webkit-scrollbar        { height: 8px; }
+.eco-float-scroll::-webkit-scrollbar-track  { background: transparent; }
+.eco-float-scroll::-webkit-scrollbar-thumb  {
+  background: rgba(0,0,0,0.30);
+  border-radius: 9999px;
+}
+.eco-float-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(0,0,0,0.50);
+}
+
+/* Tab strip — hide scrollbar, still scrollable */
+.eco-tabstrip {
+  scrollbar-width: none;
+}
+.eco-tabstrip::-webkit-scrollbar { height: 0; display: none; }
+
+/* Dialog / panel — hide native scrollbar so FloatingScrollbarY is the only one */
+.eco-noscrollbar {
+  scrollbar-width: none;
+}
+.eco-noscrollbar::-webkit-scrollbar { height: 0; width: 0; display: none; }
+
+/* Tabular numbers for amounts and counters */
+.eco-nums { font-variant-numeric: tabular-nums; }

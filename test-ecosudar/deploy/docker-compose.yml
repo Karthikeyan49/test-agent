@@ -1,0 +1,60 @@
+# Local Docker stack for the "eco-sudar" PHP API + its MariaDB database.
+# Run from this directory:  docker compose up -d --build
+#
+# Layout reminder (paths are relative to THIS file, i.e. test-ecosudar/deploy/):
+#   ../api ............ the PHP backend (front controller = api/index.php)
+#   ../database/*.sql . the phpMyAdmin dump (schema + data, MariaDB collation)
+#   ./.env ............ the app's server-side env, mounted as the PARENT of api/
+
+services:
+  # ── MariaDB (NOT MySQL: the dump uses utf8mb4_uca1400_ai_ci) ────────────────
+  db:
+    image: mariadb:11
+    container_name: ecosudar_db
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ecosudar_test
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_USER: ecosudar
+      MARIADB_PASSWORD: ecosudar
+    ports:
+      # host 3307 -> container 3306 (3307 avoids clashing with a local MySQL/MariaDB)
+      - "3307:3306"
+    volumes:
+      # The dump filename has spaces/parens; mount it read-only under a clean name.
+      # Anything in /docker-entrypoint-initdb.d/ is auto-imported into MARIADB_DATABASE
+      # on FIRST init only (i.e. when db_data is empty). The dump has no CREATE
+      # DATABASE / USE, so it lands in the pre-created ecosudar_test database.
+      - "../database/u952547820_test (1).sql:/docker-entrypoint-initdb.d/01_schema.sql:ro"
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+  # ── PHP 8.2 + Apache (mod_php, mod_rewrite) front controller ────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ecosudar-api:local
+    container_name: ecosudar_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # host 8080 -> container 80
+      - "8080:80"
+    volumes:
+      # The app code. Apache docroot is set to /var/www/html/api in the vhost,
+      # so a request to "/products" is rewritten to api/index.php by api/.htaccess.
+      - ../api:/var/www/html/api
+      # The app's server-side .env. database.php / app.php read it from
+      # dirname(__DIR__, 2) . '/.env' == the PARENT of api/ == /var/www/html/.env.
+      - ./.env:/var/www/html/.env:ro
+
+volumes:
+  db_data:

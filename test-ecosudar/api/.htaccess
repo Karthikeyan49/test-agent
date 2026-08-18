@@ -1,0 +1,27 @@
+Options -Indexes
+RewriteEngine On
+
+# Block direct access to all non-public directories
+RewriteRule ^(config|core|models|helpers|middleware|database|controllers)/ - [F,L]
+RewriteRule \.(sql|env|log|md)$ - [F,L]
+
+# Route all requests to index.php
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^(.*)$ index.php [QSA,L]
+
+# Security headers
+<IfModule mod_headers.c>
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "DENY"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=()"
+    # API only ever returns JSON or images — neither loads sub-resources.
+    Header always set Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+</IfModule>
+
+php_flag display_errors on
+php_flag log_errors on
+php_value error_log error_log

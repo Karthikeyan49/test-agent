@@ -1,0 +1,232 @@
+"""
+Real Ollama / vLLM / OpenAI-compatible AI Provider
+Makes actual HTTP calls to a local LLM for:
+  - Workflow discovery reasoning
+  - Natural language graph query answering
+  - Failure root cause hypothesis
+  - Ambiguous field mapping resolution
+Falls back to deterministic answers when AI is unavailable.
+"""
+
+import httpx
+import json
+import time
+import os
+from typing import Dict, Any, List, Optional
+
+
+class AIProvider:
+    def __init__(self, config: Dict[str, Any] = None):
+        # Read from environment variables first, fall back to provided config, then hardcoded defaults
+        env_provider = os.environ.get('SYSTEMINTEL_AI_PROVIDER', '')
+        env_base_url = os.environ.get('SYSTEMINTEL_AI_BASE_URL', '')
+        env_model    = os.environ.get('SYSTEMINTEL_AI_MODEL', '')
+        env_api_key  = os.environ.get('SYSTEMINTEL_AI_API_KEY', '')
+
+        defaults = {
+            "provider":    env_provider or "ollama",
+            "base_url":    env_base_url or "http://localhost:11434",
+            "model":       env_model    or "qwen3-coder:latest",
+            "api_key":     env_api_key  or "",
+            "temperature": 0.2,
+            "max_tokens":  2048,
+            "enabled":     env_provider != "disabled",
+        }
+        # Merge: explicit config overrides env overrides defaults
+        if config:
+            defaults.update(config)
+        self.config = defaults
+        self.request_log = []
+
+    def is_enabled(self) -> bool:
+        return self.config.get("enabled", True) and self.config.get("provider") != "disabled"
+
+    # ── Core LLM Call ─────────────────────────────────────────────────────
+
+    def _call_llm(self, prompt: str, system_prompt: str = "") -> Optional[str]:
+        """Make real HTTP call to Ollama/vLLM/OpenAI, retrying with backoff on 429."""
+        if not self.is_enabled():
+            return None
+
+        provider = self.config["provider"]
+        base_url = self.config["base_url"].rstrip("/")
+        model    = self.config["model"]
+        max_retries = self.config.get("max_retries", 3)
+
+        for attempt in range(max_retries + 1):
+            start = time.time()
+            try:
+                if provider == "ollama":
+                    # Ollama native API: POST /api/generate
+                    resp = httpx.post(
+                        f"{base_url}/api/generate",
+                        json={
+                            "model":  model,
+                            "prompt": prompt,
+                            "system": system_prompt,
+                            "stream": False,
+                            "options": {
+                                "temperature":  self.config.get("temperature", 0.2),
+                                "num_predict":  self.config.get("max_tokens", 2048),
+                            },
+                        },
+                        timeout=120.0,
+                    )
+                    resp.raise_for_status()
+                    answer = resp.json().get("response", "")
+
+                elif provider in ("vllm", "openai"):
+                    # OpenAI-compatible API: POST /v1/chat/completions
+                    headers = {"Content-Type": "application/json"}
+                    if self.config.get("api_key"):
+                        headers["Authorization"] = f"Bearer {self.config['api_key']}"
+
+                    messages = []
+                    if system_prompt:
+                        messages.append({"role": "system", "content": system_prompt})
+                    messages.append({"role": "user", "content": prompt})
+
+                    resp = httpx.post(
+                        f"{base_url}/v1/chat/completions",
+                        headers=headers,
+                        json={
+                            "model":       model,
+                            "messages":    messages,
+                            "temperature": self.config.get("temperature", 0.2),
+                            "max_tokens":  self.config.get("max_tokens", 2048),
+                        },
+                        timeout=120.0,
+                    )
+                    resp.raise_for_status()
+                    answer = resp.json()["choices"][0]["message"]["content"]
+                else:
+                    return None
+
+                latency_ms = round((time.time() - start) * 1000)
+                self._log("llm_call", prompt[:100], latency_ms, "OK")
+                return (answer or "").strip()
+
+            except httpx.HTTPStatusError as e:
+                code = e.response.status_code
+                # Rate limited or transient server error → back off and retry
+                if code in (429, 500, 502, 503, 529) and attempt < max_retries:
+                    retry_after = e.response.headers.get("retry-after")
+                    try:
+                        wait = float(retry_after) if retry_after else min(2 ** attempt * 2, 30)
+                    except (TypeError, ValueError):
+                        wait = min(2 ** attempt * 2, 30)
+                    print(f"\n[AI] HTTP {code} (rate/limit); retrying in {wait:.0f}s "
+                          f"(attempt {attempt + 1}/{max_retries})...")
+                    self._log("llm_call", prompt[:100], 0, f"RETRY_{code}_{attempt+1}")
+                    time.sleep(wait)
+                    continue
+                body = ""
+                try:
+                    body = e.response.text[:200]
+                except Exception:
+                    pass
+                print(f"\n[AI Error] HTTP {code}: {body}")
+                self._log("llm_call", prompt[:100], 0, f"HTTP_{code}")
+                return None
+            except httpx.ConnectError as e:
+                print(f"\n[AI Error] ConnectError: {e}")
+                self._log("llm_call", prompt[:100], 0, f"CONNECTION_REFUSED to {base_url}")
+                return None
+            except httpx.TimeoutException as e:
+                print(f"\n[AI Error] TimeoutException: {e}")
+                self._log("llm_call", prompt[:100], 120000, "TIMEOUT")
+                return None
+            except Exception as e:
+                import traceback
+                print(f"\n[AI Error] Exception: {e}")
+                traceback.print_exc()
+                self._log("llm_call", prompt[:100], 0, f"ERROR: {e}")
+                return None
+
+        return None
+
+    # ── Workflow Discovery ────────────────────────────────────────────────
+
+    def discover_workflows(self, graph_summary: str) -> List[Dict[str, Any]]:
+        """
+        Ask AI to discover business workflows from system graph summary.
+        Falls back to deterministic graph-path discovery if AI unavailable.
+        """
+        system_prompt = (
+            "You are a software architecture analyst. Given a system graph summary, "
+            "identify multi-step business workflows. Return JSON array with fields: "
+            "name, description, confidence (0-1), steps (list of {step, entity, action})."
+        )
+        prompt = f"Analyze this system graph and discover business workflows:\n\n{graph_summary}"
+
+        ai_response = self._call_llm(prompt, system_prompt)
+        if ai_response:
+            try:
+                # Try to parse JSON from AI response
+                start = ai_response.find('[')
+                end   = ai_response.rfind(']') + 1
+                if start >= 0 and end > start:
+                    return json.loads(ai_response[start:end])
+            except (json.JSONDecodeError, ValueError):
+                pass
+            # Return as single workflow with raw text
+            return [{"name": "AI-Discovered Workflow", "description": ai_response, "confidence": 0.85, "steps": []}]
+        return []  # Caller should use deterministic fallback
+
+    # ── Natural Language Query ────────────────────────────────────────────
+
+    def query_system(self, question: str, graph_context: str) -> Dict[str, Any]:
+        """
+        Answer natural language questions about the system using graph context.
+        Falls back to keyword search if AI unavailable.
+        """
+        system_prompt = (
+            "You are SystemIntel, a software system intelligence assistant. "
+            "Answer questions about the system architecture using the provided graph context. "
+            "Always cite specific files, line numbers, table names, and API endpoints."
+        )
+        prompt = (
+            f"Graph Context:\n{graph_context}\n\n"
+            f"Question: {question}\n\n"
+            f"Provide a detailed, evidence-based answer."
+        )
+
+        ai_response = self._call_llm(prompt, system_prompt)
+        if ai_response:
+            return {"answer": ai_response, "source": "AI", "confidence": 0.90}
+
+        return {"answer": None, "source": "FALLBACK", "confidence": 0.0}
+
+    # ── Failure Root Cause ────────────────────────────────────────────────
+
+    def analyze_failure(self, failure_context: str) -> Dict[str, Any]:
+        """
+        Ask AI to analyze test failure and suggest root cause.
+        Falls back to pattern matching if AI unavailable.
+        """
+        system_prompt = (
+            "You are a debugging expert. Analyze the test failure context and provide: "
+            "1) Probable root cause, 2) Affected file and line, 3) Suggested fix. "
+            "Be specific with file names and line numbers from the provided context."
+        )
+
+        ai_response = self._call_llm(failure_context, system_prompt)
+        if ai_response:
+            return {"analysis": ai_response, "source": "AI", "confidence": 0.85}
+        return {"analysis": None, "source": "FALLBACK", "confidence": 0.0}
+
+    # ── Logging ───────────────────────────────────────────────────────────
+
+    def _log(self, purpose: str, snippet: str, latency_ms: int, status: str):
+        self.request_log.append({
+            "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "provider":   self.config["provider"],
+            "model":      self.config["model"],
+            "purpose":    purpose,
+            "snippet":    snippet,
+            "latencyMs":  latency_ms,
+            "status":     status,
+        })
+
+    def get_logs(self) -> List[Dict]:
+        return self.request_log

@@ -1,0 +1,20 @@
+{
+  "name": "systemintel-autonomous-platform",
+  "version": "2.4.0",
+  "description": "AI-Powered Software System Intelligence & Autonomous Testing Platform",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve -s . -l 3000",
+    "dev": "npx serve -s . -l 3000"
+  },
+  "keywords": [
+    "system-intelligence",
+    "autonomous-testing",
+    "playwright",
+    "data-lineage",
+    "ast-analysis",
+    "ai-failure-analysis"
+  ],
+  "author": "Google Deepmind Team",
+  "license": "MIT"
+}

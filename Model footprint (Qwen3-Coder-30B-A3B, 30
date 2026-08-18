@@ -1,0 +1,25 @@
+Model footprint (Qwen3-Coder-30B-A3B, 30.5B total / 3.3B active MoE)
+Precision	Weights	+ KV/overhead (this tool)	Min GPU VRAM
+4-bit (AWQ/GPTQ/Q4)	~17–18 GB	~20–24 GB	24 GB ✅ recommended
+FP8 / INT8	~31 GB	~34–38 GB	48 GB
+BF16 (full)	~61 GB	~64–70 GB	80 GB
+Because it's MoE with only ~3B active params, inference is fast even on a single mid-range card.
+
+On Google Cloud (Compute Engine / Vertex AI)
+Tier	GPU	Machine type	~On-demand
+Budget (4-bit) ✅	1× L4 24 GB	g2-standard-8	~$0.85/hr
+Comfortable (FP8)	1× A100 40 GB	a2-highgpu-1g	~$3.7/hr
+Full BF16 / headroom	1× A100 80 GB	a2-ultragpu-1g	~$5/hr
+Notes: needs a GPU quota request first (L4/A100 quota is 0 by default); Spot/preemptible cuts ~60–70%; T4 16 GB is not enough (weights alone exceed it). Vertex AI uses the same GPU SKUs under a deployed endpoint.
+
+On Vast.ai (marketplace — much cheaper)
+Tier	GPU	~Rental
+Budget (4-bit) ✅	1× RTX 3090 / 4090 24 GB	~$0.25–0.55/hr
+Comfortable (FP8)	1× A6000 48 GB	~$0.55–0.80/hr
+Full BF16	1× A100 80 GB	~$1.0–1.8/hr
+Vast pricing is bid/market-driven, so filter by "verified" hosts and reliability, and expect variance.
+
+Bottom line for this tool
+Cheapest sensible setup: a single 24 GB GPU at 4-bit — L4 on GCP ($0.85/hr) or a 3090/4090 on Vast ($0.3–0.5/hr). Plenty for the agent/query loop.
+Vast.ai is ~3–5× cheaper than GCP on-demand for the same VRAM; GCP wins on reliability, quotas, and if this becomes a persistent service.
+Serve it with vLLM (--quantization awq, OpenAI-compatible) and point the tool at it: SYSTEMINTEL_AI_PROVIDER=vllm, SYSTEMINTEL_AI_BASE_URL=http://<host>:8000. My agent-loop fixes work unchanged.
