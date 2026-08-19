@@ -24,7 +24,7 @@ Two services:
 ## 1. Start it
 
 ```bash
-cd /home/karthikeyan/vscode/test-ecosudar/deploy
+cd test-ecosudar/deploy   # from the repo root
 docker compose up -d --build
 ```
 
@@ -34,6 +34,15 @@ On the **first** run the `db` container imports
 `ecosudar_test` database. That takes a little while — the `api` container waits
 for the DB healthcheck (`depends_on: condition: service_healthy`) before it is
 considered up.
+
+> **Demo admin login:** the seed dump's admin row was **sanitized** — the original
+> production email + password hash were removed. The placeholder hash is not a valid
+> credential. To log in as admin, set a new password after import, e.g.:
+> ```sql
+> UPDATE users SET password_hash = '<your bcrypt hash>' WHERE user_id = 37;
+> ```
+> SystemIntel's automated tests do not need admin login (pass a token via
+> `--auth-token` instead).
 
 Watch progress / confirm the import finished:
 

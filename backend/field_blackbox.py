@@ -15,8 +15,15 @@ field name — and emits the classic black-box battery, one fault at a time
     • length / overflow         VARCHAR(n) + 1 chars          → expect 4xx
     • enum domain               value outside ENUM(...)       → expect 4xx
     • boundary / negative       -1 into a qty/price field     → expect 4xx
-    • injection robustness      SQLi / XSS payload            → must NOT 5xx
+    • fuzz robustness           SQLi-shaped payload           → must NOT 5xx
     • (endpoint smoke)          all-valid baseline            → must NOT 5xx
+
+WARNING — the "fuzz_robustness" case is NOT a vulnerability check. It only asserts
+the server did not 5xx on a hostile-looking string; a successful SQL injection that
+returns 200 would PASS. It therefore proves robustness (no crash), never security
+(not injectable). Do not report a PASS here as "injection-safe". A real injection
+oracle (differential row-count on `' OR '1'='1` vs `' AND '1'='2`, or error-signature
+detection) is tracked as future work.
 
 The negatives are robust: they don't need a passing happy-path baseline — if the
 API validates the field a bad value yields 4xx (PASS); if it doesn't, the bad
@@ -250,10 +257,16 @@ def generate_field_blackbox_tests(graph_data: Dict[str, Any],
                 b = dict(baseline); b[cn] = "A" * (ml + 1)
                 add(ep_str, method, table, cn, "length", b, C4, f"over-length (>{ml}) rejected")
 
-            # injection robustness — must not 500 (text-ish fields only)
+            # fuzz robustness — must not 500 (text-ish fields only).
+            # NOTE: this only checks the server does not crash on a hostile-looking
+            # string; it does NOT verify the app is injection-safe (a successful SQLi
+            # returning 200 would still PASS). Labelled "fuzz_robustness", not
+            # "injection/security", so a PASS is never mistaken for "not injectable".
             if not _is_numeric(dt) and not _is_date(dt):
                 b = dict(baseline); b[cn] = _SQLI
-                add(ep_str, method, table, cn, "injection", b, NO5, "SQLi payload does not crash server")
+                add(ep_str, method, table, cn, "fuzz_robustness", b, NO5,
+                    "robustness only: server did not 5xx on a SQLi-shaped payload "
+                    "(does NOT prove the endpoint is injection-safe)")
 
             if n[0] >= max_cases:
                 return tests
@@ -477,12 +490,12 @@ if __name__ == "__main__":
     assert "vendors.name" in reqs and "vendors.email" in reqs
     assert "vendors.vendor_id" not in reqs and "vendors.created_at" not in reqs
     # method coverage
-    for k in ("required", "type", "format", "enum", "length", "injection", "negative", "smoke"):
+    for k in ("required", "type", "format", "enum", "length", "fuzz_robustness", "negative", "smoke"):
         assert k in by_case, f"missing black-box method: {k}"
-    # every negative expects a 4xx; injection/smoke expect !5xx
+    # every negative expects a 4xx; fuzz_robustness/smoke expect !5xx
     for t in tests:
         exp = t["assertions"][0].get("expectedStatusClass")
-        if t["subtype"] in ("injection", "smoke"):
+        if t["subtype"] in ("fuzz_robustness", "smoke"):
             assert exp == "!5xx"
         else:
             assert exp == "4xx", f"{t['subtype']} should expect 4xx"

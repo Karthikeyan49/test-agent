@@ -1745,7 +1745,11 @@ CREATE TABLE `users` (
 --
 
 INSERT INTO `users` (`user_id`, `name`, `email`, `phone`, `password_hash`, `user_type`, `staff_role`, `company_name`, `address`, `city`, `state`, `pincode`, `gst_number`, `udyam_number`, `created_at`, `updated_at`, `is_active`, `approval_status`, `approved_at`, `approved_by`, `rejection_reason`) VALUES
-(37, 'Admin', 'admin@ecosudar.com', '9000000001', '$2y$12$6uOP9cEtZvwSysGDX6QWS.bSi7jtqOdwHPZwU3L9hIpFaOdZnbJwC', 'admin', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-04-17 16:51:16', '2026-04-26 16:33:46', 1, 'approved', NULL, NULL, NULL);
+-- SANITIZED: the original row contained a real production admin email + bcrypt
+-- password hash. Replaced with a non-production placeholder. The placeholder hash
+-- is intentionally NOT a valid credential — set a new admin password after import
+-- (e.g. UPDATE users SET password_hash = ... WHERE user_id = 37;). See deploy/README.md.
+(37, 'Admin', 'admin@demo.local', '9000000001', '$2y$12$DEMOonlyDEMOonlyDEMOonResetThisHashResetThisHashRes00', 'admin', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-04-17 16:51:16', '2026-04-26 16:33:46', 1, 'approved', NULL, NULL, NULL);
 
 -- --------------------------------------------------------
 

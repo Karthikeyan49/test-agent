@@ -686,7 +686,7 @@ def cmd_test(args):
         print(f"{YELLOW}[!] Contract-negative generation failed: {e}{RESET}")
 
     # Per-field black-box DEPTH — every writable field × the full method battery
-    # (required, type, format, length, enum, boundary/negative, injection). Opt-in
+    # (required, type, format, length, enum, boundary/negative, fuzz-robustness). Opt-in
     # (--field-blackbox) because it multiplies the case count. Schema-driven,
     # deterministic, executable single-fault tests.
     if getattr(args, 'field_blackbox', False):
@@ -1262,7 +1262,7 @@ Examples:
     tp.add_argument("--scenarios-ai",  action="store_true", help="With --scenarios, let the AI provider design extra use-case scenarios (graph-grounded; deterministic checks still decide pass/fail)")
     tp.add_argument("--scenarios-ai-max", type=int, default=8, help="Max AI-designed scenarios (default: 8)")
     tp.add_argument("--ui-base-url",   help="Frontend base URL for UI steps (default: same as --base-url); use when the SPA and API are on different hosts")
-    tp.add_argument("--field-blackbox", action="store_true", help="DEPTH: generate the full per-field black-box battery (required/type/format/length/enum/boundary/injection) for every writable field")
+    tp.add_argument("--field-blackbox", action="store_true", help="DEPTH: generate the full per-field black-box battery (required/type/format/length/enum/boundary/fuzz-robustness) for every writable field. NOTE: the fuzz-robustness case only asserts the server does not 5xx on a hostile-looking string — it is NOT a vulnerability/injection check.")
     tp.add_argument("--field-blackbox-max", type=int, default=4000, help="Cap on per-field black-box cases (default: 4000)")
     tp.add_argument("--auth-token",     help="Static bearer token sent on every request (test protected endpoints)")
     tp.add_argument("--auth-login-url", help="Login URL/path to obtain a token before testing")

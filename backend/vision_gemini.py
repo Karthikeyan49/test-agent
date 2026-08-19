@@ -44,10 +44,14 @@ class GeminiVision:
                                 "generationConfig": {"temperature": 0}}
         if as_json:
             body["generationConfig"]["responseMimeType"] = "application/json"
-        url = _ENDPOINT.format(model=self.model) + f"?key={self.api_key}"
+        # Send the key as a header, never in the URL query string: URLs are echoed
+        # into httpx exception messages, proxy/access logs and terminal scrollback,
+        # which would leak the key on any error.
+        url = _ENDPOINT.format(model=self.model)
+        headers = {"x-goog-api-key": self.api_key}
         for attempt in range(4):
             try:
-                r = httpx.post(url, json=body, timeout=60.0)
+                r = httpx.post(url, json=body, headers=headers, timeout=60.0)
                 if r.status_code in (429, 500, 503) and attempt < 3:
                     wait = min(2 ** attempt * 2, 20)
                     print(f"[Vision] HTTP {r.status_code} (overloaded) — retry in {wait}s")
@@ -59,7 +63,8 @@ class GeminiVision:
                     return None
                 return "".join(p.get("text", "") for p in cands[0].get("content", {}).get("parts", []))
             except httpx.HTTPStatusError as e:
-                print(f"[Vision] Gemini error: {e}")
+                # Log only the status code — str(e) embeds the full request URL.
+                print(f"[Vision] Gemini error: HTTP {e.response.status_code}")
                 return None
             except Exception as e:
                 if attempt < 3:

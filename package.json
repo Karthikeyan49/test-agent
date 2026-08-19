@@ -15,6 +15,6 @@
     "ast-analysis",
     "ai-failure-analysis"
   ],
-  "author": "Google Deepmind Team",
+  "author": "SystemIntel contributors",
   "license": "MIT"
 }

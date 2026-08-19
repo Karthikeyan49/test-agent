@@ -193,7 +193,16 @@ The complete mapping. The important pattern: **most are grounded techniques, not
 
 ## Build status (this cycle)
 
-Every phase now has a **shipped, deterministic core**, verified end-to-end on the eco-sudar project:
+> **Scope caveat (read first):** "✅ shipped" below means *a working deterministic
+> core, verified end-to-end on the single `test-ecosudar` PHP target* — i.e.
+> proof-of-concept quality, **not** GA across stacks. Known gaps behind these ticks:
+> GraphRAG's semantic embeddings degrade to lexical keyword match unless
+> `sentence-transformers` is installed (it is not in `requirements.txt`); the
+> cross-layer oracle needs a manually recorded HAR; the mutation demo scored
+> 3/8 (38%). Treat this table as "verified on ecosudar", and re-validate on a
+> second, non-PHP repo before claiming multi-framework breadth.
+
+Every phase now has a **deterministic core**, verified end-to-end on the eco-sudar project:
 
 | Phase | Status | Evidence |
 |---|---|---|
