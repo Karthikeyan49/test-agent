@@ -33,8 +33,12 @@ Build each dossier in loops (facts first — AI can never overwrite a fact):
      Loop 1 ENRICH → AI infers missing fields + writes plain-language use-cases
      Loop 2 AUDIT  → AI flags missing FKs / normalization (schema-grounded)
    ELSE → deterministic heuristics still produce the audit
-WRITE the .md files  →  repo_memory.py INDEXES them as the RAG corpus
-   → later phases RETRIEVE the relevant page's context instead of dumping the repo
+WRITE per-page .md (for humans) + page_docs.json (machine-readable corpus)
+ └─ WHEN --scenarios runs: repo_memory INGESTS page_docs.json (auto-detected in
+      ./page_docs, or --page-docs-dir) and MERGES any fields / use-cases the
+      page-docs pass surfaced (incl. AI-enriched ones) that the graph-only pass
+      missed → scenario generation is genuinely grounded on the page-docs corpus.
+    IF no page_docs.json present → repo_memory is graph-derived (same as before).
 ```
 
 ## PHASE 1 · Scan → Parse → Graph  (`file_scanner`, `engine`, `graph_builder`)
@@ -137,7 +141,8 @@ FOR EACH test:
 
 ## SCENARIO LAYER  (`--scenarios` — RAG + 3-way verification)
 ```
-repo_memory   → RAG memory from the page-docs (pages/fields/use-cases/connections/cross-page)
+repo_memory   → RAG memory from the graph, ENRICHED by the page_docs.json corpus
+                when present (pages/fields/use-cases/connections/cross-page)
 scenarios     → generate CRUD-lifecycle · use-case-flow · cross-page scenarios
                 (deterministic; + AI ones grounded on RAG + contracts if --scenarios-ai)
 scenario_runner → run each across UI + API + DB with ${id} binding

@@ -159,7 +159,14 @@ def _is_form_like(page_name: str) -> bool:
 
 
 # ── build_repo_memory ────────────────────────────────────────────────────────
-def build_repo_memory(graph_data: Dict[str, Any]) -> Dict[str, Any]:
+def build_repo_memory(graph_data: Dict[str, Any],
+                      page_docs: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Build the RAG memory from the System Graph. When ``page_docs`` (the
+    machine-readable output of ``page_docs.build_page_docs``) is supplied, its
+    per-page fields and use-cases ENRICH the memory — so anything the page-docs
+    pass surfaced that the graph-only pass missed (completeness-fill fields,
+    AI-inferred fields, extra use-cases) genuinely reaches scenario generation.
+    Without it, the memory is graph-derived exactly as before."""
     graph_data = graph_data or {}
     raw_pages = graph_data.get("pages", []) or []
     raw_fields = graph_data.get("fields", []) or []
@@ -406,6 +413,28 @@ def build_repo_memory(graph_data: Dict[str, Any]) -> Dict[str, Any]:
                               f"{op['name']} reads {table_names[0]} and is expected to display it.",
                 })
 
+    # ═══ 6. page-docs enrichment (optional) ═══
+    # Merge in fields / use-cases the page-docs corpus captured that the
+    # graph-only pass didn't — this is what makes page-docs actually FEED
+    # scenario generation (not just be a standalone artifact).
+    if page_docs:
+        _field_keys = {(f.get("page"), f.get("name")) for f in fields_out}
+        _uc_keys    = {(u.get("name"), tuple(sorted(u.get("pages") or []))) for u in use_cases_out}
+        added_f = added_u = 0
+        for pd in page_docs:
+            page = pd.get("name")
+            for fld in pd.get("fields", []) or []:
+                fn = fld.get("name") if isinstance(fld, dict) else fld
+                if fn and (page, fn) not in _field_keys:
+                    fields_out.append({"name": fn, "page": page, "source": "page_docs"})
+                    _field_keys.add((page, fn)); added_f += 1
+            for uc in pd.get("use_cases", []) or []:
+                key = (uc.get("name"), tuple(sorted(uc.get("pages") or [])))
+                if uc.get("name") and key not in _uc_keys:
+                    use_cases_out.append(uc); _uc_keys.add(key); added_u += 1
+        if added_f or added_u:
+            print(f"[repo_memory] enriched from page-docs: +{added_f} field(s), +{added_u} use-case(s)")
+
     return make_repo_memory(pages_out, fields_out, use_cases_out, connections_out, cross_page_out)
 
 
@@ -596,5 +625,22 @@ if __name__ == "__main__":
     print(f"retrieve('customer') -> {len(results)} results; "
           f"kinds={[r['kind'] for r in results]}")
     assert len(results) > 0, "retrieve('customer') returned nothing"
+
+    # page-docs enrichment: a field/use-case only in the page-docs corpus must
+    # appear in the memory when passed in (this is what feeds scenario generation).
+    base_fields = len(memory["fields"])
+    base_ucs    = len(memory["use_cases"])
+    enriched = build_repo_memory(graph, page_docs=[{
+        "name": (memory["pages"][0]["name"] if memory["pages"] else "SomePage"),
+        "fields": [{"name": "__pagedoc_only_field__"}],
+        "use_cases": [{"name": "__pagedoc_only_usecase__", "pages": ["ZZ"]}],
+    }])
+    assert any(f.get("name") == "__pagedoc_only_field__" and f.get("source") == "page_docs"
+               for f in enriched["fields"]), "page-docs field was not merged into memory"
+    assert any(u.get("name") == "__pagedoc_only_usecase__" for u in enriched["use_cases"]), \
+        "page-docs use-case was not merged into memory"
+    assert len(enriched["fields"]) == base_fields + 1
+    assert len(enriched["use_cases"]) == base_ucs + 1
+    print("[self-test] page-docs enrichment merges into memory OK")
 
     print("SELF-TEST PASS")

@@ -482,7 +482,15 @@ def run_scenario_mode(args, graph_data):
         return
 
     section("Repo Memory (RAG) + Use-Case Scenario Generation")
-    memory  = build_repo_memory(graph_data)
+    # If a page-docs corpus exists (from `scan --page-docs`), ingest it so
+    # scenario generation is genuinely grounded on it. Look at --page-docs-dir,
+    # else the default ./page_docs.
+    from page_docs import load_page_docs
+    _pd_dir = getattr(args, "page_docs_dir", None) or "./page_docs"
+    _page_docs = load_page_docs(_pd_dir)
+    if _page_docs:
+        print(f"{GREEN}[✓] Grounding on page-docs corpus: {len(_page_docs)} page(s) from {_pd_dir}{RESET}")
+    memory  = build_repo_memory(graph_data, page_docs=_page_docs)
     md_path = write_repo_memory_md(memory, os.path.join(out_dir, "repo_memory.md"))
     print(f"{GREEN}[✓] Repo memory — {len(memory['pages'])} pages, {len(memory['use_cases'])} use-cases, "
           f"{len(memory['connections'])} connections, {len(memory['cross_page'])} cross-page flows{RESET}")
@@ -1463,6 +1471,7 @@ Examples:
     tp.add_argument("--explore",      action="store_true", help="[experimental] AI proposes edge-case scenarios (grounded on the graph) that templates miss")
     tp.add_argument("--scenarios",    action="store_true", help="SCENARIO mode: RAG repo-memory + use-case/CRUD/cross-page scenarios, run with 3-way UI+API+DB verification, emit per-scenario .md + JSON + visual HTML + FAILURES.md")
     tp.add_argument("--scenarios-out", default="./scenario_report", help="Output directory for scenario reports (default: ./scenario_report)")
+    tp.add_argument("--page-docs-dir", help="Directory holding a page-docs corpus (page_docs.json from `scan --page-docs`). When present, scenario generation is grounded on it (default: ./page_docs).")
     tp.add_argument("--scenarios-ai",  action="store_true", help="With --scenarios, let the AI provider design extra use-case scenarios (graph-grounded; deterministic checks still decide pass/fail)")
     tp.add_argument("--scenarios-ai-max", type=int, default=8, help="Max AI-designed scenarios (default: 8)")
     tp.add_argument("--ui-base-url",   help="Frontend base URL for UI steps (default: same as --base-url); use when the SPA and API are on different hosts")

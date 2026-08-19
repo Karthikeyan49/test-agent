@@ -26,7 +26,26 @@ backend/repo_memory.RepoMemoryIndex indexes for test generation.
 
 import os
 import re
+import json
 from typing import Any, Dict, List, Optional
+
+
+def load_page_docs(path_or_dir: str) -> Optional[List[Dict[str, Any]]]:
+    """Load the machine-readable page-docs corpus (page_docs.json). Accepts the
+    JSON file path or the directory that contains it. Returns the list of per-page
+    structured entries, or None if not present."""
+    if not path_or_dir:
+        return None
+    p = path_or_dir
+    if os.path.isdir(p):
+        p = os.path.join(p, "page_docs.json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            return (json.load(fh) or {}).get("pages") or None
+    except Exception:
+        return None
 
 try:
     from repo_memory import build_repo_memory
@@ -248,13 +267,16 @@ def build_page_docs(graph_data: Dict[str, Any], out_dir: str,
         pages = pages[:pages_limit]
 
     written = []
+    structured = []          # machine-readable corpus (consumed by repo_memory)
     for page in pages:
         facts = _page_facts(page, memory, graph_data)
         md = _facts_markdown(facts)
+        ai_notes = ""
         if provider is not None and getattr(provider, "is_enabled", lambda: False)():
             try:
                 enriched = _ai_enrich(provider, facts, md)
                 if enriched:
+                    ai_notes = enriched
                     md += "\n\n---\n\n## AI Enrichment (grounded)\n\n" + enriched
             except Exception as e:
                 md += f"\n\n> _AI enrichment skipped: {e}_"
@@ -262,6 +284,19 @@ def build_page_docs(graph_data: Dict[str, Any], out_dir: str,
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(md + "\n")
         written.append(path)
+        # Capture the structured facts (drop the heavy table_objs) + AI notes.
+        structured.append({
+            "name": facts["name"], "route": facts.get("route"),
+            "fields": facts.get("fields") or [], "endpoints": facts.get("endpoints") or [],
+            "tables": facts.get("tables") or [], "use_cases": facts.get("use_cases") or [],
+            "ai_notes": ai_notes,
+        })
+
+    # Machine-readable corpus: repo_memory ingests this so page-docs actually
+    # FEEDS scenario/test generation (not just produce human .md files).
+    json_path = os.path.join(out_dir, "page_docs.json")
+    with open(json_path, "w", encoding="utf-8") as fh:
+        json.dump({"pages": structured}, fh, indent=2, default=str)
 
     # app-wide data-model audit file
     audit_md = ["# Data-Model Audit", "", "## Candidate missing foreign keys"]
@@ -279,7 +314,7 @@ def build_page_docs(graph_data: Dict[str, Any], out_dir: str,
     with open(index_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(index_md) + "\n")
 
-    return {"pages_written": len(written), "files": written,
+    return {"pages_written": len(written), "files": written, "json": json_path,
             "audit": audit, "index": index_path, "audit_file": audit_path, "out_dir": out_dir}
 
 
