@@ -284,8 +284,13 @@ def build_page_docs(graph_data: Dict[str, Any], out_dir: str,
 
 
 if __name__ == "__main__":
-    import json, tempfile
-    G = "/home/karthikeyan/vscode/test-ecosudar/system_graph.json"
+    import json, os, sys, tempfile
+    # Needs a rich multi-page graph. Use SYSTEMINTEL_GRAPH if provided; otherwise
+    # skip cleanly (exit 0) so CI stays green without the bundled target.
+    G = os.environ.get("SYSTEMINTEL_GRAPH")
+    if not G or not os.path.exists(G):
+        print("SELF-TEST SKIPPED — set SYSTEMINTEL_GRAPH to a real system_graph.json to run")
+        sys.exit(0)
     graph = json.load(open(G))
     out = tempfile.mkdtemp(prefix="page_docs_")
     # deterministic path (no AI) — must work standalone

@@ -144,14 +144,17 @@ class DBRunner:
             # ── schema_exists: verify the table exists at all ──────────────────
             if check_type == 'schema_exists':
                 driver = self.driver
+                # S9: sanitize the identifier even in the string-literal position
+                # (a table name with a quote could otherwise break out).
+                safe_table = _safe_ident(table)
                 if driver == 'sqlite':
-                    query = f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
+                    query = f"SELECT name FROM sqlite_master WHERE type='table' AND name='{safe_table}'"
                 elif driver == 'postgresql':
-                    query = f"SELECT tablename FROM pg_tables WHERE tablename='{table}'"
+                    query = f"SELECT tablename FROM pg_tables WHERE tablename='{safe_table}'"
                 elif driver == 'mysql':
-                    query = f"SHOW TABLES LIKE '{table}'"
+                    query = f"SHOW TABLES LIKE '{safe_table}'"
                 else:
-                    query = f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name='{table}'"
+                    query = f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name='{safe_table}'"
 
                 cursor.execute(query)
                 rows = cursor.fetchall()
@@ -173,9 +176,13 @@ class DBRunner:
             if check_type == 'fk_integrity':
                 ref_table = assertion.get('refTable', '')
                 ref_col   = assertion.get('refColumn', '')
-                query = (f'SELECT COUNT(*) FROM "{table}" c '
-                         f'WHERE c."{column}" IS NOT NULL '
-                         f'AND c."{column}" NOT IN (SELECT p."{ref_col}" FROM "{ref_table}" p)')
+                # S9: sanitize every identifier — these come from the scanned
+                # schema / a caller-supplied graph JSON and were previously raw.
+                st, sc = _safe_ident(table), _safe_ident(column)
+                srt, src = _safe_ident(ref_table), _safe_ident(ref_col)
+                query = (f'SELECT COUNT(*) FROM "{st}" c '
+                         f'WHERE c."{sc}" IS NOT NULL '
+                         f'AND c."{sc}" NOT IN (SELECT p."{src}" FROM "{srt}" p)')
                 cursor.execute(query)
                 orphans = cursor.fetchone()[0]
                 duration_ms = round(time.time() * 1000 - start_ms, 2)

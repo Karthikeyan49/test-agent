@@ -1,0 +1,61 @@
+"""
+Aggregated self-test suite for SystemIntel's own engine (closes A3).
+
+Each backend module ships a deterministic `__main__` self-test. Historically
+these could only be run one at a time by hand (`python3 backend/<mod>.py`) and
+nothing gated them. This collects them into a single pytest run so CI can fail
+the build if any regress.
+
+Only modules whose self-tests are deterministic and run fully OFFLINE (no live
+app, DB server, browser, or LLM) are included here. Modules that need an
+external service (playwright_runner, vision_gemini, ai_provider, agent, …) are
+intentionally excluded and covered by integration tests instead.
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+BACKEND = Path(__file__).resolve().parent.parent / "backend"
+
+OFFLINE_SELFTEST_MODULES = [
+    "metamorphic",          # generator + executor (Q1)
+    "injection_oracle",     # differential SQLi / XSS (S2)
+    "http_runner",          # auth-skip (Q2) + off-origin guard (S7)
+    "db_runner",
+    "mutation",
+    "field_blackbox",
+    "db_seeder",
+    "graph_rag",
+    "page_docs",            # skips cleanly without a real graph
+    "invariants",
+    "fixtures",
+    "spec_oracle",
+    "endpoint_contracts",
+    "scenario_contracts",
+    "scenario_reports",
+    "reporters",
+    "repo_memory",
+    "ui_audits",
+    "explorer",
+    "graph_builder",
+    "engine",
+    "file_scanner",
+]
+
+
+@pytest.mark.parametrize("module", OFFLINE_SELFTEST_MODULES)
+def test_module_selftest(module):
+    """Run `python3 backend/<module>.py` and require a clean (exit 0) self-test."""
+    script = BACKEND / f"{module}.py"
+    assert script.exists(), f"missing module {script}"
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=str(BACKEND), capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"{module} self-test failed (exit {proc.returncode})\n"
+        f"--- stdout ---\n{proc.stdout[-2000:]}\n"
+        f"--- stderr ---\n{proc.stderr[-2000:]}"
+    )

@@ -765,6 +765,20 @@ def cmd_test(args):
     # HTTP runner
     http_runner = HTTPRunner(base_url=base_url, timeout=args.timeout)
 
+    # ── S3: production-write guardrail ──────────────────────────────────────
+    # The suite fires real POST/PUT/PATCH/DELETE (and hostile payloads). Pointed
+    # at a non-local host it can create/edit/DELETE real records. Refuse mutating
+    # requests against a non-local target unless the operator explicitly opts in.
+    from urllib.parse import urlparse as _urlparse
+    _host = (_urlparse(base_url).hostname or "").lower()
+    _is_local = _host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or _host.endswith(".local")
+    block_writes = (not _is_local) and (not getattr(args, "allow_nonlocal_writes", False))
+    if block_writes:
+        print(f"{YELLOW}{BOLD}[!] SAFETY: '{_host}' is not a local target. Mutating requests "
+              f"(POST/PUT/PATCH/DELETE) will be SKIPPED to avoid changing real data.{RESET}")
+        print(f"{YELLOW}    Re-run with --allow-nonlocal-writes ONLY against a disposable "
+              f"staging target you fully control (never production).{RESET}")
+
     # Seeded SQLite test DB (Phase 4): build a self-contained DB from the discovered
     # schema so DB/schema assertions execute offline (no production creds needed).
     if getattr(args, 'seed_db', False):
@@ -878,6 +892,39 @@ def cmd_test(args):
         }
         start_tc = time.time()
 
+        # 0. Metamorphic relation tests are routed through the metamorphic
+        #    EXECUTOR (Q1) — it performs the paired requests and evaluates the
+        #    relation (count +1, field echo, sum, idempotency). Previously these
+        #    fell through to the plain assertion loop and degraded to GET→200.
+        #    Honestly SKIPs (never PASS) when it lacks a body / bound id.
+        if tc.get("technique") == "METAMORPHIC" and http_runner:
+            from metamorphic import execute_metamorphic_test
+
+            def _mr_run(a):
+                return http_runner.run_assertion(
+                    {**a, "headers": {"Content-Type": "application/json", **auth.auth_headers()}})
+
+            mbody = dict(tc.get("testData") or {}) or None
+            verdict = execute_metamorphic_test(tc, _mr_run, body=mbody)
+            tc_result["metamorphicResult"] = verdict
+            tag = f"{verdict.get('relation')}: {verdict.get('reason')}"
+            if verdict.get("skipped"):
+                tc_result["overallStatus"] = "SKIPPED"
+                skipped_count += 1
+                print(f"  {YELLOW}→ SKIPPED  ({tag}){RESET}")
+            elif verdict.get("passed"):
+                tc_result["overallStatus"] = "PASS"
+                passed_count += 1
+                print(f"  {GREEN}→ PASS  ({tag}){RESET}")
+            else:
+                tc_result["overallStatus"] = "FAIL"
+                failed_count += 1
+                tc_result["failureReasons"].append(tag)
+                print(f"  {RED}→ FAIL  ({tag}){RESET}")
+            tc_result["durationMs"] = round((time.time() - start_tc) * 1000, 2)
+            run_results.append(tc_result)
+            continue
+
         # 1. Playwright browser execution (only for UI tests that carry steps)
         if playwright_runner and tc.get("steps"):
             pw_result = playwright_runner.run_test_case(tc)
@@ -893,13 +940,27 @@ def cmd_test(args):
         # 2. HTTP API assertions
         http_assertions = [a for a in tc.get("assertions", []) if a.get("type") == "API"]
         for a in http_assertions:
+            # S3: block mutating verbs against a non-local target unless opted in.
+            _verb = (a.get("endpoint", "GET").split(" ", 1)[0] or "GET").upper()
+            if block_writes and _verb in ("POST", "PUT", "PATCH", "DELETE"):
+                tc_result["httpResults"].append({
+                    "type": "API", "endpoint": a.get("endpoint"), "method": _verb,
+                    "skipped": True,
+                    "skipReason": "write blocked: non-local target without --allow-nonlocal-writes"})
+                print(f"  {YELLOW}  ⚠ {a.get('endpoint')} — write blocked (non-local target){RESET}")
+                continue
             body = dict(tc.get("testData", {}))
             a_with_body = {**a, "body": body,
                            "headers": {"Content-Type": "application/json", **auth.auth_headers()}}
             hr = http_runner.run_assertion(a_with_body)
             tc_result["httpResults"].append(hr)
             http_runner.print_result(hr)
-            if not hr.get("passed"):
+            if hr.get("skipped"):
+                # Precondition unmet (auth wall, or backend unreachable) — not a
+                # failure and not a pass; excluded from the executed count below.
+                reason = hr.get("skipReason") or "assertion skipped"
+                print(f"  {YELLOW}  ⚠ {a.get('endpoint')} — skipped: {reason}{RESET}")
+            elif not hr.get("passed"):
                 err = hr.get("error")
                 if err and "CONNECTION_REFUSED" in err:
                     # Backend not running — mark as warning not failure
@@ -1025,6 +1086,20 @@ def cmd_test(args):
         },
         "testResults": run_results,
     }
+
+    # ── S10: redact live response bodies from the persisted report by default ──
+    # A live responseBody can contain PII or tokens the app returned. Reports are
+    # shared by hand, so strip them unless the operator opts in.
+    if not getattr(args, "include_response_bodies", False):
+        _redacted = 0
+        for r in report["testResults"]:
+            for hr in r.get("httpResults", []):
+                if "responseBody" in hr and hr["responseBody"] not in (None, ""):
+                    hr["responseBody"] = "<redacted: run --include-response-bodies to keep>"
+                    _redacted += 1
+        if _redacted:
+            print(f"{DIM}[i] Redacted {_redacted} response body/bodies from the report "
+                  f"(use --include-response-bodies to keep them).{RESET}")
 
     if args.format == "html":
         output_path = args.output if args.output.endswith(".html") else args.output.replace(".json", ".html")
@@ -1276,6 +1351,8 @@ Examples:
     tp.add_argument("--db-password",  help="(PostgreSQL/MySQL) database password")
     tp.add_argument("--format",       choices=["json", "html", "junit"], default="json", help="Report format (default: json)")
     tp.add_argument("--output",       default="SystemIntel_Report.json", help="Report output path (default: SystemIntel_Report.json)")
+    tp.add_argument("--allow-nonlocal-writes", action="store_true", help="SAFETY: permit mutating requests (POST/PUT/PATCH/DELETE) against a NON-local --base-url. Off by default — use ONLY on a disposable staging target you control, NEVER production.")
+    tp.add_argument("--include-response-bodies", action="store_true", help="Keep live HTTP response bodies in the saved report (redacted by default, since they can contain PII/tokens).")
 
     # ── query ─────────────────────────────────────────────────────────────────
     qp = sub.add_parser("query", help="Natural language query over system graph")

@@ -207,9 +207,25 @@ __all__ = [
 
 if __name__ == "__main__":
     import os
+    import json
     import tempfile
 
-    GRAPH_PATH = "/home/karthikeyan/vscode/test-ecosudar/system_graph.json"
+    # Portable self-test: use a real graph if SYSTEMINTEL_GRAPH points at one,
+    # otherwise build a small synthetic graph so this runs on any machine / CI.
+    GRAPH_PATH = os.environ.get("SYSTEMINTEL_GRAPH")
+    if not GRAPH_PATH or not os.path.exists(GRAPH_PATH):
+        _synthetic = {"dbTables": [
+            {"name": f"t{i}", "columns": [
+                {"name": "id", "dataType": "INT", "isPrimaryKey": True},
+                {"name": "val", "dataType": "VARCHAR(50)"}]} for i in range(72)] + [
+            {"name": "purchase_orders", "columns": [
+                {"name": "po_id", "dataType": "INT", "isPrimaryKey": True},
+                {"name": "vendor_id", "dataType": "INT"},
+                {"name": "po_number", "dataType": "VARCHAR(50)"}]}],
+            "foreignKeys": []}
+        fd_g, GRAPH_PATH = tempfile.mkstemp(suffix=".json", prefix="si_graph_")
+        with os.fdopen(fd_g, "w") as _gf:
+            json.dump(_synthetic, _gf)
 
     fd, tmp_db = tempfile.mkstemp(suffix=".db", prefix="systemintel_seed_")
     os.close(fd)

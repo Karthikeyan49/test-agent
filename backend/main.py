@@ -37,11 +37,16 @@ class ScanRequest(BaseModel):
 
 @app.post("/api/v1/scan")
 def trigger_scan(req: ScanRequest):
-    repo_path = os.path.abspath(req.repoPath)
-    
-    # Security: prevent path traversal outside allowed root
-    allowed_root = os.path.abspath(REPO_ROOT)
-    if not repo_path.startswith(allowed_root):
+    # Security (S8): resolve symlinks with realpath and compare with commonpath,
+    # so a sibling like /srv/repos-evil (startswith /srv/repos) or a symlink that
+    # escapes the root can no longer bypass the check.
+    repo_path    = os.path.realpath(req.repoPath)
+    allowed_root = os.path.realpath(REPO_ROOT)
+    try:
+        within = os.path.commonpath([allowed_root, repo_path]) == allowed_root
+    except ValueError:
+        within = False  # different drives / relative-vs-absolute
+    if not within:
         raise HTTPException(
             status_code=403,
             detail=f"Access denied: repoPath must be within {allowed_root}. "
@@ -115,4 +120,9 @@ def get_graph():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Bind to localhost by default (S8): this API has no authentication and can
+    # trigger repo scans, so it must not listen on all interfaces. Override with
+    # SYSTEMINTEL_API_HOST only behind a trusted proxy / auth layer.
+    host = os.environ.get("SYSTEMINTEL_API_HOST", "127.0.0.1")
+    port = int(os.environ.get("SYSTEMINTEL_API_PORT", "8000"))
+    uvicorn.run(app, host=host, port=port)

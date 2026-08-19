@@ -383,11 +383,30 @@ def retrieve_context(graph_data: Dict[str, Any], query: str,
 # ── Self-test ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    GRAPH_PATH = "/home/karthikeyan/vscode/test-ecosudar/system_graph.json"
+    import os
     MAX_CHARS = 4000
 
-    with open(GRAPH_PATH, "r", encoding="utf-8") as fh:
-        graph = json.load(fh)
+    # Portable: use a real graph via SYSTEMINTEL_GRAPH, else a synthetic one so
+    # this self-test runs on any machine / CI.
+    GRAPH_PATH = os.environ.get("SYSTEMINTEL_GRAPH")
+    if GRAPH_PATH and os.path.exists(GRAPH_PATH):
+        with open(GRAPH_PATH, "r", encoding="utf-8") as fh:
+            graph = json.load(fh)
+    else:
+        graph = {
+            "nodes": [
+                {"id": "n1", "type": "APIEndpoint", "name": "POST /orders"},
+                {"id": "n2", "type": "Table",       "name": "orders"},
+                {"id": "n3", "type": "Table",       "name": "purchase_orders"},
+                {"id": "n4", "type": "Column",      "name": "vendor_id"},
+                {"id": "n5", "type": "Controller",  "name": "OrderController"},
+            ],
+            "edges": [
+                {"source": "n1", "target": "n5", "type": "IMPLEMENTED_BY"},
+                {"source": "n5", "target": "n2", "type": "WRITES_TO"},
+                {"source": "n3", "target": "n4", "type": "CONTAINS"},
+            ],
+        }
 
     print(f"Loaded graph: {len(graph.get('nodes', []))} nodes, "
           f"{len(graph.get('edges', []))} edges")

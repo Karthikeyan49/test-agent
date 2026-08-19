@@ -84,8 +84,32 @@ def generate_mutants(source: str, max_mutants: int = 20) -> List[Dict[str, Any]]
 class MutationTester:
     """Run a caller-supplied test suite against injected mutants and score it."""
 
+    @staticmethod
+    def _recover_orphans(files: List[str]) -> List[str]:
+        """S4: if a previous run was hard-killed mid-mutation, a `<path>.si-orig`
+        backup will still exist next to the source (which may hold an injected
+        bug). Restore any such file from its backup BEFORE doing anything else,
+        so the tool never leaves — or builds on — a corrupted source tree."""
+        import os
+        recovered = []
+        for path in files:
+            bak = path + ".si-orig"
+            if os.path.exists(bak):
+                with open(bak, "r", encoding="utf-8") as f:
+                    good = f.read()
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(good)
+                os.remove(bak)
+                recovered.append(path)
+        return recovered
+
     def run(self, files: List[str], run_tests: Callable[[], Tuple[int, int]],
             max_mutants_per_file: int = 10) -> Dict[str, Any]:
+        import os, signal
+        recovered = self._recover_orphans(files)
+        if recovered:
+            print(f"[mutation] recovered {len(recovered)} source file(s) from a "
+                  f"previous interrupted run before starting")
         base_passed, base_failed = run_tests()
         if base_passed <= 0:
             return {"error": "baseline has no passing tests — cannot score mutants",
@@ -101,22 +125,49 @@ class MutationTester:
             except OSError:
                 continue
 
-            for mut in generate_mutants(original, max_mutants_per_file):
-                tried += 1
-                try:
-                    with open(path, 'w', encoding='utf-8') as f:
-                        f.write(mut["mutated_source"])
-                    _p, mut_failed = run_tests()
-                    if mut_failed > base_failed:
-                        killed += 1
-                    else:
-                        survived += 1
-                        if len(surviving_samples) < 10:
-                            surviving_samples.append(
-                                {"file": path, "lineno": mut["lineno"], "op": mut["op"]})
-                finally:
-                    with open(path, 'w', encoding='utf-8') as f:
-                        f.write(original)   # ALWAYS restore
+            # S4: write an on-disk backup and restore-from-DISK, so even a
+            # SIGKILL / OOM / power-loss between mutation and restore is
+            # recoverable on the next run (see _recover_orphans). Also install a
+            # signal handler so Ctrl-C / SIGTERM restores before exiting.
+            bak = path + ".si-orig"
+            with open(bak, 'w', encoding='utf-8') as f:
+                f.write(original)
+
+            def _restore_and_exit(signum, frame, _p=path, _o=original, _b=bak):
+                with open(_p, 'w', encoding='utf-8') as f:
+                    f.write(_o)
+                if os.path.exists(_b):
+                    os.remove(_b)
+                raise SystemExit(f"[mutation] interrupted — restored {_p}")
+
+            prev_int  = signal.signal(signal.SIGINT,  _restore_and_exit)
+            prev_term = signal.signal(signal.SIGTERM, _restore_and_exit)
+
+            try:
+                for mut in generate_mutants(original, max_mutants_per_file):
+                    tried += 1
+                    try:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(mut["mutated_source"])
+                        _p, mut_failed = run_tests()
+                        if mut_failed > base_failed:
+                            killed += 1
+                        else:
+                            survived += 1
+                            if len(surviving_samples) < 10:
+                                surviving_samples.append(
+                                    {"file": path, "lineno": mut["lineno"], "op": mut["op"]})
+                    finally:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(original)   # ALWAYS restore (in-memory)
+            finally:
+                # restore from disk backup, drop it, and un-hook the signals
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(original)
+                if os.path.exists(bak):
+                    os.remove(bak)
+                signal.signal(signal.SIGINT,  prev_int)
+                signal.signal(signal.SIGTERM, prev_term)
 
         return {
             "mutantsTried": tried,

@@ -502,7 +502,7 @@ if __name__ == "__main__":
 
     # ── contract-rule-driven negative generation (generate_contract_negative_tests) ──
     import json, os
-    _GRAPH_PATH = "/home/user/test-agent/graph.json"
+    _GRAPH_PATH = os.environ.get("SYSTEMINTEL_GRAPH", "graph.json")
     if os.path.exists(_GRAPH_PATH):
         with open(_GRAPH_PATH) as _fh:
             cgraph = json.load(_fh)
