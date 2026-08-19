@@ -357,7 +357,7 @@ def run_mutation_mode(args, test_cases):
     auth = _build_auth(args, base_url)
     auth_headers = {"Content-Type": "application/json", **auth.auth_headers()}
     if auth.is_active():
-        print(f"{GREEN}[✓] Auth active — mutation suite carries {auth.header}{RESET}")
+        print(f"{GREEN}[✓] Auth active — mutation suite carries {'Cookie' if auth.mode=='cookie' else auth.header}{RESET}")
 
     # Resolve target files (comma-separated; relative to --path when given).
     files = []
@@ -468,6 +468,19 @@ def run_scenario_mode(args, graph_data):
     out_dir  = getattr(args, 'scenarios_out', None) or "./scenario_report"
     os.makedirs(out_dir, exist_ok=True)
 
+    # S3: scenario mode runs CRUD (POST/PUT/DELETE) lifecycle flows. Refuse to run
+    # it against a non-local target unless the operator explicitly opts in — the
+    # main-path write guard is not reached on this code path.
+    from urllib.parse import urlparse as _urlparse
+    _shost = (_urlparse(base_url).hostname or "").lower()
+    _s_local = _shost in ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+    if not _s_local and not getattr(args, "allow_nonlocal_writes", False):
+        print(f"{RED}{BOLD}[!] SAFETY: scenario mode drives CRUD (create/update/delete) flows and "
+              f"'{_shost}' is not a local target.{RESET}")
+        print(f"{YELLOW}    Refusing to run scenarios against a non-local host without "
+              f"--allow-nonlocal-writes (use ONLY on a disposable staging target).{RESET}")
+        return
+
     section("Repo Memory (RAG) + Use-Case Scenario Generation")
     memory  = build_repo_memory(graph_data)
     md_path = write_repo_memory_md(memory, os.path.join(out_dir, "repo_memory.md"))
@@ -498,7 +511,7 @@ def run_scenario_mode(args, graph_data):
     auth = _build_auth(args, base_url)
     auth_headers = {"Content-Type": "application/json", **auth.auth_headers()}
     if auth.is_active():
-        print(f"{GREEN}[✓] Auth active — API steps carry {auth.header}{RESET}")
+        print(f"{GREEN}[✓] Auth active — API steps carry {'Cookie' if auth.mode=='cookie' else auth.header}{RESET}")
     http_runner = HTTPRunner(base_url=base_url, timeout=args.timeout)
 
     db_runner = None
@@ -563,7 +576,8 @@ def run_scenario_mode(args, graph_data):
         db_runner.disconnect()
 
     # ── Reports ─────────────────────────────────────────────────────────────
-    paths = write_scenario_reports(results, out_dir, scenarios=scenarios)
+    paths = write_scenario_reports(results, out_dir, scenarios=scenarios,
+                                   redact=not getattr(args, "include_response_bodies", False))
     p  = sum(1 for r in results if r["status"] == "PASS")
     f  = sum(1 for r in results if r["status"] == "FAIL")
     sk = sum(1 for r in results if r["status"] == "SKIPPED")
@@ -625,7 +639,10 @@ def _apply_config_and_preset(args):
                 cfg = yaml.safe_load(f) or {}
             for k, v in cfg.items():
                 attr = k.replace("-", "_")
-                if hasattr(args, attr) and getattr(args, attr) in (None, False):
+                # Identity check (not `in (None, False)`) so an int arg legitimately
+                # set to 0 (e.g. --timeout 0) isn't treated as unset and overwritten.
+                cur = getattr(args, attr, "__missing__")
+                if cur is None or cur is False:
                     setattr(args, attr, v)
             print(f"{GREEN}[✓] Loaded config defaults from {args.config}{RESET}")
         except Exception as e:
@@ -676,6 +693,16 @@ def cmd_test(args):
         scan_result = scan_repository(repo_path)
         print_scan_summary(scan_result)
         analysis = engine.analyze_repository(scan_result)
+        # A2: surface parse errors on the rescan path too (not only in `scan`) so a
+        # test run against a repo with unparseable files warns of an incomplete graph.
+        try:
+            from engine import get_parse_errors
+            _perrs = get_parse_errors()
+            if _perrs:
+                print(f"{YELLOW}⚠ {len(_perrs)} file(s) failed to parse — the graph "
+                      f"(and generated tests) may be INCOMPLETE.{RESET}")
+        except Exception:
+            pass
     else:
         print(f"{RED}[✗] Provide --path to repo directory or --graph to graph JSON.{RESET}")
         sys.exit(1)
@@ -846,7 +873,7 @@ def cmd_test(args):
     else:
         auth = AuthManager({"mode": "none"})
     if auth.is_active():
-        print(f"{GREEN}[✓] Auth active — protected requests carry {auth.header}{RESET}")
+        print(f"{GREEN}[✓] Auth active — protected requests carry {'Cookie' if auth.mode=='cookie' else auth.header}{RESET}")
 
     # HTTP runner
     http_runner = HTTPRunner(base_url=base_url, timeout=args.timeout)
@@ -987,6 +1014,14 @@ def cmd_test(args):
             from metamorphic import execute_metamorphic_test
 
             def _mr_run(a):
+                # S3: honor the production-write guardrail here too — the executor
+                # issues real POST/PUT/DELETE, which must be blocked against a
+                # non-local target just like the plain assertion loop. Returning a
+                # skipped result makes the executor SKIP the whole relation.
+                verb = (a.get("endpoint", "GET").strip().split(" ", 1)[0] or "GET").upper()
+                if block_writes and verb in ("POST", "PUT", "PATCH", "DELETE"):
+                    return {"skipped": True,
+                            "skipReason": "write blocked: non-local target without --allow-nonlocal-writes"}
                 return http_runner.run_assertion(
                     {**a, "headers": {"Content-Type": "application/json", **auth.auth_headers()}})
 
@@ -1027,7 +1062,7 @@ def cmd_test(args):
         http_assertions = [a for a in tc.get("assertions", []) if a.get("type") == "API"]
         for a in http_assertions:
             # S3: block mutating verbs against a non-local target unless opted in.
-            _verb = (a.get("endpoint", "GET").split(" ", 1)[0] or "GET").upper()
+            _verb = (a.get("endpoint", "GET").strip().split(" ", 1)[0] or "GET").upper()
             if block_writes and _verb in ("POST", "PUT", "PATCH", "DELETE"):
                 tc_result["httpResults"].append({
                     "type": "API", "endpoint": a.get("endpoint"), "method": _verb,

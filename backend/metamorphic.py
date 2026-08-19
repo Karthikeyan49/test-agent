@@ -183,6 +183,28 @@ def _class(s):
     return s // 100 if isinstance(s, int) else None
 
 
+def _is_2xx(s):
+    return isinstance(s, int) and 200 <= s < 300
+
+
+_ADJUSTMENT_KEYS = ("tax", "gst", "vat", "discount", "shipping", "freight",
+                    "fee", "surcharge", "rounding", "adjustment")
+
+
+def _has_adjustment(resp):
+    """True if the document carries a non-zero tax/discount/shipping/fee/… field,
+    so `total` legitimately differs from the bare Σ(line items) and the strict
+    total==Σitems check would false-FAIL (F2)."""
+    node = resp.get("data") if isinstance(resp, dict) and isinstance(resp.get("data"), dict) else resp
+    if not isinstance(node, dict):
+        return False
+    for k, v in node.items():
+        kl = k.lower()
+        if any(a in kl for a in _ADJUSTMENT_KEYS) and isinstance(v, (int, float)) and v:
+            return True
+    return False
+
+
 def execute_metamorphic_test(test: Dict[str, Any], run, *, body: Optional[dict] = None) -> Dict[str, Any]:
     """Execute one metamorphic test and return a real PASS/FAIL/SKIP verdict.
 
@@ -200,11 +222,22 @@ def execute_metamorphic_test(test: Dict[str, Any], run, *, body: Optional[dict] 
             r1 = run({"type": "API", "endpoint": target, "body": body or {}, "authSensitive": True})
             if r1.get("skipped"):
                 return _verdict(rel, target, None, r1.get("skipReason", "first call skipped"), skipped=True)
+            s1 = r1.get("actualStatus")
+            # F3: the first application must succeed (2xx) before idempotency is
+            # meaningful — two 5xx or two 4xx matching is not "idempotent".
+            if not _is_2xx(s1):
+                return _verdict(rel, target, None,
+                                f"first {target.split()[0]} was not 2xx (got {s1}) — cannot judge idempotency",
+                                skipped=True)
             r2 = run({"type": "API", "endpoint": target, "body": body or {}, "authSensitive": True})
-            c1, c2 = _class(r1.get("actualStatus")), _class(r2.get("actualStatus"))
-            return _verdict(rel, target, c1 == c2 and c1 is not None,
-                            f"idempotent: first={r1.get('actualStatus')} second={r2.get('actualStatus')} "
-                            "(status class must match)")
+            s2 = r2.get("actualStatus")
+            # A DELETE that returns 2xx then 404 is idempotent in EFFECT (the
+            # resource is gone) — accept it; otherwise require matching classes.
+            verb = target.split(" ", 1)[0].upper()
+            ok = _is_2xx(s2) or (verb == "DELETE" and s2 == 404)
+            return _verdict(rel, target, ok,
+                            f"idempotent: first={s1} second={s2} "
+                            "(second application must leave the same successful state)")
 
         if rel == "round_trip":
             create, read = ev.get("create", target), ev.get("read")
@@ -220,13 +253,27 @@ def execute_metamorphic_test(test: Dict[str, Any], run, *, body: Optional[dict] 
                 return _verdict(rel, target, None, "create returned no id to read back", skipped=True)
             read_ep = re.sub(r"\{[^}]+\}", rid, read)
             rd = run({"type": "API", "endpoint": read_ep, "authSensitive": True})
+            # F1: the read-back MUST succeed (2xx). A 404/500 on GET of the id we
+            # just created means it was not persisted/readable — that is a real
+            # bug, but it is not a "round-trip mismatch" we can diff field-by-field,
+            # so surface it as a FAIL (the create claimed success), not a PASS.
+            if not _is_2xx(rd.get("actualStatus")):
+                return _verdict(rel, read_ep, False,
+                                f"created id {rid} but read-back returned "
+                                f"{rd.get('actualStatus')} — resource not persisted/readable")
             got = rd.get("responseBody")
             got = got.get("data") if isinstance(got, dict) and isinstance(got.get("data"), dict) else got
             if not isinstance(got, dict):
                 return _verdict(rel, target, None, "read response not an object", skipped=True)
-            mismatches = [f"{k}: sent {v!r} got {got.get(k)!r}"
-                          for k, v in body.items()
-                          if k in got and str(got.get(k)) != str(v)]
+            # F1: a sent field ABSENT from the read-back is a silent data-drop —
+            # exactly what round-trip must catch — so treat missing keys as a
+            # mismatch, not just wrong values.
+            mismatches = []
+            for k, v in body.items():
+                if k not in got:
+                    mismatches.append(f"{k}: sent {v!r} but ABSENT from read-back (data dropped)")
+                elif str(got.get(k)) != str(v):
+                    mismatches.append(f"{k}: sent {v!r} got {got.get(k)!r}")
             return _verdict(rel, read_ep, not mismatches,
                             "round-trip echoed all sent fields" if not mismatches
                             else "round-trip mismatch — " + "; ".join(mismatches))
@@ -252,9 +299,18 @@ def execute_metamorphic_test(test: Dict[str, Any], run, *, body: Optional[dict] 
             cr = run({"type": "API", "endpoint": target, "body": body, "authSensitive": True})
             if cr.get("skipped"):
                 return _verdict(rel, target, None, cr.get("skipReason", "create skipped"), skipped=True)
-            total, s = _total_and_sum(cr.get("responseBody"))
+            resp = cr.get("responseBody")
+            total, s = _total_and_sum(resp)
             if total is None or s is None:
                 return _verdict(rel, target, None, "could not identify total / line-item amounts in response", skipped=True)
+            # F2: if the document has tax/discount/shipping/fee, total ≠ Σitems by
+            # design — we can't verify the formula without knowing the rates, so
+            # SKIP rather than cry wolf. Only assert strict equality when the total
+            # should equal the bare line-item sum.
+            if _has_adjustment(resp):
+                return _verdict(rel, target, None,
+                                f"total={total} vs Σ(items)={s} but tax/discount/shipping present "
+                                "— cannot verify formula without the rates", skipped=True)
             return _verdict(rel, target, abs(total - s) < 0.01,
                             f"sum-invariant: total={total} Σ(items)={s}")
 
@@ -330,6 +386,36 @@ if __name__ == "__main__":
     # round_trip — no body available → SKIP, never PASS
     r = execute_metamorphic_test(by_rel["round_trip"], make_run(rt_ok), body=None)
     assert r["skipped"] is True and r["passed"] is None, r
+
+    # F1: read-back 404s (not persisted) → FAIL, not a false "echoed all fields"
+    def rt_404(ep):
+        if ep.startswith("POST"): return 201, {"id": 5}
+        return 404, {"message": "Not found"}
+    r = execute_metamorphic_test(by_rel["round_trip"], make_run(rt_404),
+                                 body={"name": "Acme", "email": "a@b.com"})
+    assert r["passed"] is False and not r["skipped"], r
+
+    # F1: read-back DROPS a sent field → FAIL (silent data-drop caught)
+    def rt_drop(ep):
+        if ep.startswith("POST"): return 201, {"id": 5}
+        return 200, {"id": 5, "name": "Acme"}   # email dropped
+    r = execute_metamorphic_test(by_rel["round_trip"], make_run(rt_drop),
+                                 body={"name": "Acme", "email": "a@b.com"})
+    assert r["passed"] is False and "ABSENT" in r["reason"], r
+
+    # F3: first application not 2xx → SKIP (can't judge idempotency)
+    idem_concrete = {"relation": "idempotent", "targetEndpoint": "DELETE /orders/5",
+                     "sourceEvidence": [{"endpoint": "DELETE /orders/5"}]}
+    def idem_5xx(ep): return 500, {}
+    r = execute_metamorphic_test(idem_concrete, make_run(idem_5xx), body={})
+    assert r["skipped"] is True, r
+    # F3: DELETE 2xx then 404 is idempotent-in-effect → PASS (not a false FAIL)
+    calls = {"n": 0}
+    def idem_del(ep):
+        calls["n"] += 1
+        return (200, {}) if calls["n"] == 1 else (404, {})
+    r = execute_metamorphic_test(idem_concrete, make_run(idem_del), body={})
+    assert r["passed"] is True, r
 
     # sum_invariant — correct math (100 + 50 == 150) → PASS; wrong total → FAIL
     sum_test = {"relation": "sum_invariant", "targetEndpoint": "POST /orders",

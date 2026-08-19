@@ -36,9 +36,23 @@ class GeminiVision:
     def is_available(self) -> bool:
         return bool(self.api_key)
 
+    @staticmethod
+    def _external_consent() -> bool:
+        return os.environ.get("SYSTEMINTEL_AI_ALLOW_EXTERNAL", "").lower() in ("1", "true", "yes")
+
     # ── Core multimodal call ──────────────────────────────────────────────
     def _generate(self, parts: List[dict], as_json: bool = True) -> Optional[str]:
         if not self.is_available():
+            return None
+        # S5: Gemini is ALWAYS an external Google endpoint, and this sends a
+        # rendered screenshot of the app (which can contain data) + field names.
+        # It is a second egress path independent of ai_provider, so it must honor
+        # the same consent gate — otherwise the S5 policy is bypassable.
+        if not self._external_consent():
+            if not getattr(self, "_egress_warned", False):
+                print("[Vision] BLOCKED: refusing to send a screenshot to Google "
+                      "(external). Set SYSTEMINTEL_AI_ALLOW_EXTERNAL=1 to consent.")
+                self._egress_warned = True
             return None
         body: Dict[str, Any] = {"contents": [{"parts": parts}],
                                 "generationConfig": {"temperature": 0}}

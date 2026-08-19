@@ -66,6 +66,12 @@ def scan_repository(repo_path: str) -> Dict[str, Any]:
             rel_path  = os.path.relpath(full_path, repo_path)
             ext       = os.path.splitext(filename)[1].lower()
 
+            # S8: never read a symlinked file — it can point outside the repo
+            # (e.g. x.py -> /etc/passwd) and would exfiltrate arbitrary files.
+            if os.path.islink(full_path):
+                result["skipped_files"].append({"path": rel_path, "reason": "symlink"})
+                continue
+
             # Skip empty or binary-only files
             try:
                 file_size = os.path.getsize(full_path)

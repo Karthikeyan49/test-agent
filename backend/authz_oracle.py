@@ -26,9 +26,12 @@ when a probe hits the login wall (401), the check SKIPs — never a false "secur
 from typing import Any, Dict, Optional, Callable
 
 
-def _rid_signature(resp: Any) -> str:
-    """A cheap fingerprint of a resource body, to tell 'same resource' from an
-    empty/error body when both requests return 2xx."""
+def _rid_signature(resp: Any):
+    """A STABLE resource-identity fingerprint, or None when the body carries no
+    identifier we can trust. F6: the key-set / list-length fallbacks were removed —
+    two DIFFERENT resources (Alice vs Bob) share a key-set and would collide into a
+    false "same resource" IDOR. Only a real id/uuid/code/number proves sameness;
+    without one we return None and the caller SKIPs rather than guessing."""
     node = resp
     if isinstance(node, dict) and isinstance(node.get("data"), dict):
         node = node["data"]
@@ -36,10 +39,7 @@ def _rid_signature(resp: Any) -> str:
         for k in ("id", "uuid", "code", "number"):
             if node.get(k) is not None:
                 return f"{k}={node[k]}"
-        return "obj:" + ",".join(sorted(node.keys()))[:80]
-    if isinstance(node, list):
-        return f"list:{len(node)}"
-    return "scalar"
+    return None
 
 
 def _verdict(kind, endpoint, vulnerable, reason, skipped=False):
@@ -70,11 +70,25 @@ def check_idor(endpoint: str, run: Callable[[Dict[str, Any]], Dict[str, Any]],
     if _is_denied(sb):
         return _verdict("idor", endpoint, False,
                         f"other role correctly denied ({sb}) — resource isolated")
-    if _is_2xx(sb) and _rid_signature(a.get("responseBody")) == _rid_signature(b.get("responseBody")):
-        return _verdict("idor", endpoint, True,
-                        f"other role read the SAME resource ({sb}) — horizontal privilege / IDOR")
+    if _is_2xx(sb):
+        sig_a = _rid_signature(a.get("responseBody"))
+        sig_b = _rid_signature(b.get("responseBody"))
+        # F6: only assert IDOR when BOTH bodies carry a real identifier AND it is
+        # the SAME one. Different ids → each role sees its own record (e.g.
+        # /profile/me), which is correct isolation, not IDOR. No stable id → we
+        # cannot prove same-resource access, so SKIP instead of guessing.
+        if sig_a is None or sig_b is None:
+            return _verdict("idor", endpoint, None,
+                            "other role also got 2xx but neither body carries a stable id — "
+                            "cannot prove same-resource access (use a resource-id endpoint)",
+                            skipped=True)
+        if sig_a == sig_b:
+            return _verdict("idor", endpoint, True,
+                            f"other role read the SAME resource ({sig_a}) — horizontal privilege / IDOR")
+        return _verdict("idor", endpoint, False,
+                        f"other role got a DIFFERENT resource ({sig_a} vs {sig_b}) — each sees its own")
     return _verdict("idor", endpoint, None,
-                    f"inconclusive (other role status {sb}) — differing bodies", skipped=True)
+                    f"inconclusive (other role status {sb})", skipped=True)
 
 
 def check_privilege(endpoint: str, run: Callable[[Dict[str, Any]], Dict[str, Any]],
@@ -119,4 +133,20 @@ if __name__ == "__main__":
     r = check_idor("GET /orders/1001", secure, "", "")
     assert r["skipped"] is True and r["passed"] is None, r
 
-    print("authz_oracle SELF-TEST PASS (IDOR + privilege differential)")
+    # F6: a /me-style endpoint where each role sees its OWN record (different ids)
+    #     must be ISOLATED, not a false IDOR.
+    def per_caller(a):
+        tok = a.get("authToken")
+        return {"actualStatus": 200, "responseBody": {"id": 1 if tok == "owner" else 2,
+                                                      "name": "Alice" if tok == "owner" else "Bob"}}
+    r = check_idor("GET /profile/me", per_caller, "owner", "attacker")
+    assert r["vulnerable"] is False and not r["skipped"], r
+
+    # F6: id-less bodies that would previously collide → SKIP, not a false IDOR.
+    def idless(a):
+        tok = a.get("authToken")
+        return {"actualStatus": 200, "responseBody": {"name": "Alice" if tok == "owner" else "Bob"}}
+    r = check_idor("GET /profile/me", idless, "owner", "attacker")
+    assert r["skipped"] is True and r["passed"] is None, r
+
+    print("authz_oracle SELF-TEST PASS (IDOR + privilege differential + F6)")

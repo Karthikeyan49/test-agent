@@ -95,6 +95,12 @@ class MutationTester:
         for path in files:
             bak = path + ".si-orig"
             if os.path.exists(bak):
+                # Skip a truncated/empty backup: a crash DURING the backup write
+                # (before any mutation) can leave a 0-byte .si-orig while the source
+                # itself is still clean — restoring from it would corrupt a good file.
+                if os.path.getsize(bak) == 0:
+                    os.remove(bak)
+                    continue
                 with open(bak, "r", encoding="utf-8") as f:
                     good = f.read()
                 with open(path, "w", encoding="utf-8") as f:
@@ -130,8 +136,14 @@ class MutationTester:
             # recoverable on the next run (see _recover_orphans). Also install a
             # signal handler so Ctrl-C / SIGTERM restores before exiting.
             bak = path + ".si-orig"
-            with open(bak, 'w', encoding='utf-8') as f:
+            # Write the backup ATOMICALLY (tmp + os.replace) so a crash mid-write
+            # can't leave a partial .si-orig that a later recovery would trust.
+            _tmp = bak + ".tmp"
+            with open(_tmp, 'w', encoding='utf-8') as f:
                 f.write(original)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(_tmp, bak)
 
             def _restore_and_exit(signum, frame, _p=path, _o=original, _b=bak):
                 with open(_p, 'w', encoding='utf-8') as f:

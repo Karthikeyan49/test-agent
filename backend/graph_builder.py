@@ -28,13 +28,17 @@ def _normalize_api_path(p: str) -> str:
 
 def _api_path_match(ep_path: str, call_endpoint: str) -> bool:
     """True if a frontend call endpoint refers to the same route as a declared
-    endpoint, tolerating a differing base-path prefix (exact match still counts)."""
+    endpoint, tolerating ONLY a differing api/version base-path prefix.
+
+    F7: normalization already strips the api/version prefix from both sides, so a
+    legitimate base-path difference (/api/v1/customers vs /customers) collapses to
+    an EXACT match. We therefore require equality after normalization and no longer
+    do a loose `endswith` — which previously bound /api/admin/users to /users and
+    /customers/orders to /orders (wrong endpoint → wrong cross-layer test)."""
     if (ep_path or '') == (call_endpoint or ''):
         return True
     a, b = _normalize_api_path(ep_path), _normalize_api_path(call_endpoint)
-    if not a or not b or a == '/' or b == '/':
-        return a == b
-    return a == b or a.endswith(b) or b.endswith(a)
+    return bool(a) and a == b
 
 
 class SystemGraphBuilder:
@@ -357,16 +361,21 @@ class SystemGraphBuilder:
         # specific write persisted unchanged, instead of "some row with 4242 exists".
         import secrets
         _tok   = secrets.token_hex(3)                 # e.g. 'a1b2c3'
-        _nonce = 900000000 + secrets.randbelow(99_999_999)
+        # F8: keep the unique numeric SMALL enough to fit narrow columns —
+        # SMALLINT maxes at 32767 and DECIMAL(10,2) at 8 integer digits, so a
+        # 9-digit nonce would be rejected/truncated and fail a correct app. A value
+        # in [1000, 31000) is unique-enough against a freshly-seeded test DB and
+        # fits SMALLINT/INT/DECIMAL alike.
+        _nonce = 1000 + secrets.randbelow(30000)
 
         def _value_for(col):
             nm = col.lower()
-            if 'email' in nm: return f'xlayer+{_tok}@test.com'   # still a valid, unique email
+            if 'email' in nm: return f'xlayer+{_tok}@test.com'   # valid, unique email
             if 'date' in nm:  return '2026-01-01'
             if any(k in nm for k in ('amount', 'price', 'qty', 'quantity', 'limit',
                                      'balance', 'salary', 'count', 'stock', 'total')):
-                return str(_nonce)                              # unique numeric
-            return f'XL_{col}_{_tok}'                            # unique text
+                return str(_nonce)                              # unique, column-safe numeric
+            return f'XL{_tok}'                                   # unique short text (fits narrow VARCHARs)
 
         tests, n = [], 0
         for node in self.nodes.values():
@@ -609,8 +618,13 @@ if __name__ == "__main__":
     assert _api_path_match("/api/v1/customers", "/customers")
     assert _api_path_match("/orders/{id}", "/api/orders/:id")
     assert _api_path_match("/customers", "/customers")
+    assert _api_path_match("/api/v1/customers", "/customers")
     assert not _api_path_match("/customers", "/vendors")
     assert not _api_path_match("/orders", "/invoices")
+    # F7: loose suffix matches must NOT bind
+    assert not _api_path_match("/users", "/api/admin/users"), "must not bind /admin/users to /users"
+    assert not _api_path_match("/orders", "/customers/orders"), "must not bind /customers/orders to /orders"
+    assert not _api_path_match("/orders", "/preorders")
 
     # A frontend call to /api/v1/customers must bind (SUBMITS_TO) to a declared
     # /customers endpoint across the base-path boundary.

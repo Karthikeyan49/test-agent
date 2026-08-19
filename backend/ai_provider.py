@@ -47,7 +47,9 @@ class AIProvider:
         prompt would ship repo source/schema to a third party (Groq/OpenAI/…)."""
         from urllib.parse import urlparse
         host = (urlparse(self.config.get("base_url", "")).hostname or "").lower()
-        return host not in ("localhost", "127.0.0.1", "::1", "") and not host.endswith(".local")
+        # Only explicit loopback is auto-allowed. `.local` (mDNS) was dropped — on a
+        # network where `exfil.local` resolves it could ship code without consent.
+        return host not in ("localhost", "127.0.0.1", "::1", "")
 
     def _external_consent(self) -> bool:
         if self.config.get("allow_external"):

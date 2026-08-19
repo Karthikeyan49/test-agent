@@ -528,14 +528,26 @@ def _render_failures_markdown(results: List[Dict[str, Any]]) -> str:
 # Public entrypoint
 # --------------------------------------------------------------------------- #
 def write_scenario_reports(results: List[Dict[str, Any]], out_dir: str,
-                            scenarios: Optional[List[Dict[str, Any]]] = None) -> Dict[str, str]:
+                            scenarios: Optional[List[Dict[str, Any]]] = None,
+                            redact: bool = True) -> Dict[str, str]:
     """Write per-scenario Markdown, machine JSON, a visual HTML report, and a
     FAILURES.md digest for ``results`` (a list of ``ScenarioResult`` dicts) into
     ``out_dir``. ``scenarios`` (optional) supplies preconditions for context.
 
+    S10: live ``apiResponse`` bodies (which can contain PII/tokens) are REDACTED
+    from the written reports by default; pass ``redact=False`` (CLI
+    ``--include-response-bodies``) to keep them.
+
     Returns ``{"per_scenario_dir", "json", "html", "failures_md"}`` — the paths
     written.
     """
+    if redact:
+        import copy
+        results = copy.deepcopy(results)
+        for r in results:
+            for step in r.get("steps", []) or []:
+                if step.get("apiResponse") is not None:
+                    step["apiResponse"] = "<redacted: run with --include-response-bodies to keep>"
     os.makedirs(out_dir, exist_ok=True)
     per_scenario_dir = os.path.join(out_dir, "scenarios")
     os.makedirs(per_scenario_dir, exist_ok=True)

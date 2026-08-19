@@ -762,7 +762,8 @@ class PythonSystemIntelligenceEngine:
             # ── BLACK-BOX: auth boundary (protected route, no token → 401) ──
             if auth:
                 add(f"[Auth] {ep_str} without token → 401", "Security / Auth", "BLACK_BOX",
-                    [{"type": "API", "endpoint": ep_str, "expectedStatusCode": 401, "noAuth": True}], ev)
+                    [{"type": "API", "endpoint": ep_str, "expectedStatusCode": 401,
+                      "noAuth": True, "authSensitive": False}], ev)
 
             # ── BLACK-BOX: not-found (bogus id in path → 404) ──
             if has_param and method in ("GET", "PUT", "DELETE", "PATCH"):

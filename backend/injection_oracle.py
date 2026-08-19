@@ -88,16 +88,18 @@ def check_sql_injection(endpoint: str, field: str, baseline: Dict[str, Any],
                             f"TRUE payload returned {rt} rows vs FALSE {rf} — boolean SQL injection")
         return _verdict("sqli", field, False, f"row counts equal ({rt}=={rf}) — not injectable on this field")
 
-    # Fall back to status + body-length divergence.
+    # No countable rows. F5: a bare status/body divergence is NOT proof of
+    # injection on its own (a WAF, length validation, or content check can differ
+    # benignly). The only strong signal without row counts — a 5xx — was already
+    # handled above. So: identical responses → safe; anything else → inconclusive
+    # SKIP (needs a token / a differential we can count), never a false "vulnerable".
     bt, bf = _body_text(t.get("responseBody")), _body_text(f.get("responseBody"))
-    if st != sf:
-        return _verdict("sqli", field, True,
-                        f"status diverged on tautology vs contradiction ({st} vs {sf}) — injection signal")
-    if bt == bf:
+    if st == sf and bt == bf:
         return _verdict("sqli", field, False, "identical response to both probes — not injectable")
-    # Different bodies but same status and no countable rows → inconclusive.
     return _verdict("sqli", field, None,
-                    "responses differ but not countably — inconclusive, needs a token/oracle", skipped=True)
+                    f"responses differ (status {st}/{sf}) but no countable-row signal — "
+                    "inconclusive, supply a token / a list endpoint to get a differential",
+                    skipped=True)
 
 
 def check_reflected_xss(endpoint: str, field: str, baseline: Dict[str, Any],
@@ -107,9 +109,19 @@ def check_reflected_xss(endpoint: str, field: str, baseline: Dict[str, Any],
              "body": {**baseline, field: _XSS_PAYLOAD}, "authSensitive": True})
     if r.get("skipped"):
         return _verdict("xss", field, None, r.get("skipReason", "auth wall"), skipped=True)
-    text = _body_text(r.get("responseBody"))
+    resp = r.get("responseBody")
+    # F4: reflected XSS only matters when the browser will RENDER the reflection as
+    # HTML. An API that echoes the term inside a JSON body ({"query":"<script>…"})
+    # is not exploitable XSS — the browser shows JSON, it doesn't execute it. The
+    # http_runner parses JSON into a dict/list and leaves an HTML page as a raw
+    # str, so only flag when the body is raw text (a candidate HTML response).
+    if isinstance(resp, (dict, list)):
+        return _verdict("xss", field, False,
+                        "payload echoed in a JSON body (not rendered as HTML) — not exploitable XSS")
+    text = resp if isinstance(resp, str) else _body_text(resp)
     if _XSS_PAYLOAD in text:
-        return _verdict("xss", field, True, "payload reflected UNESCAPED in the response — reflected XSS")
+        return _verdict("xss", field, True,
+                        "payload reflected UNESCAPED in a text/HTML response — reflected XSS")
     if _XSS_MARK in text:
         return _verdict("xss", field, False, "payload present but escaped/encoded — not exploitable as-is")
     return _verdict("xss", field, False, "payload not reflected — safe")
@@ -156,4 +168,18 @@ if __name__ == "__main__":
     r = check_reflected_xss("POST /search", "q", base, safe)
     assert r["vulnerable"] is False and r["passed"] is True, r
 
-    print("injection_oracle SELF-TEST PASS (differential SQLi + reflected XSS)")
+    # F4: a JSON API that echoes the term in its body is NOT XSS → must not flag.
+    def json_echo(a):
+        return {"actualStatus": 200, "responseBody": {"query": a["body"]["q"], "results": []}}
+    r = check_reflected_xss("POST /search", "q", base, json_echo)
+    assert r["vulnerable"] is False, r
+
+    # F5: two probes differing only by status (no countable rows) → inconclusive
+    # SKIP, not a false "vulnerable".
+    def status_wobble(a):
+        v = a["body"]["q"]
+        return {"actualStatus": 200 if v == _SQLI_TRUE else 400, "responseBody": {"ok": True}}
+    r = check_sql_injection("POST /search", "q", base, status_wobble)
+    assert r["skipped"] is True and r["passed"] is None, r
+
+    print("injection_oracle SELF-TEST PASS (differential SQLi + reflected XSS + F4/F5)")

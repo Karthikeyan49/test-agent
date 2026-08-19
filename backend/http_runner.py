@@ -47,7 +47,12 @@ class HTTPRunner:
     def _same_origin(self, url: str) -> bool:
         from urllib.parse import urlparse
         a, b = urlparse(url), urlparse(self.base_url)
-        return (a.scheme, a.hostname, a.port) == (b.scheme, b.hostname, b.port)
+        # Normalize implicit default ports so http://host and http://host:80 are
+        # treated as the same origin (avoids a false off-origin BLOCK).
+        _def = {"http": 80, "https": 443}
+        pa = a.port or _def.get((a.scheme or "").lower())
+        pb = b.port or _def.get((b.scheme or "").lower())
+        return (a.scheme, a.hostname, pa) == (b.scheme, b.hostname, pb)
 
     def run_assertion(self, assertion: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -94,7 +99,11 @@ class HTTPRunner:
         }
 
         try:
-            with httpx.Client(timeout=self.timeout, transport=self._transport) as client:
+            # follow_redirects pinned False: only the pre-redirect URL is
+            # origin-checked, so a 3xx must not silently carry the request (and
+            # bearer token) to another host.
+            with httpx.Client(timeout=self.timeout, transport=self._transport,
+                              follow_redirects=False) as client:
                 if method == 'GET':
                     resp = client.get(url, headers=headers)
                 elif method == 'POST':
