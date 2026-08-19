@@ -16,18 +16,23 @@ where **AI genuinely helps**, and where **a human must intervene**.
 
 ## 0 · Executive status
 
-| Bucket | Total | ✅ Resolved | 🟡 Partial | ⏳ Open (planned) |
+| Bucket | Total | ✅ Resolved | 🟡 Partial | ⏳ Open / 👤 human |
 |---|---|---|---|---|
-| Security | 10 | 6 | 1 | 3 |
-| QA / Oracle | 10 | 4 | 1 | 5 |
-| Architecture | 9 | 5 | 1 | 3 |
-| Product | 9 | 4 | 2 | 3 |
-| **Total** | **38** | **19** | **5** | **14** |
+| Security | 10 | 8 | 1 | 1 (S1 by your decision) |
+| QA / Oracle | 11 | 9 | 1 | 1 |
+| Architecture | 9 | 7 | 1 | 1 (A1 relabeled) |
+| Product | 9 | 8 | 1 | 0 |
+| **Total** | **39** | **32** | **4** | **3** |
 
-The headline change this session: the tool now has **real oracles** for the bug
-classes it previously could not catch — metamorphic execution (business-logic
-math), an auth-precondition skip (no more false-green behind login), and a
-differential SQLi/XSS oracle (real vulnerability detection, not "did not crash").
+Round 2 closed the remaining oracle + product gaps: static base-path `SUBMITS_TO`
+(Q4b), error-field attribution (Q5), a UI workflow post-condition (Q6), an
+IDOR/privilege **authz oracle** (needs 2 role tokens), invariant honesty (Q8), an
+LLM **egress policy** (S5), parse-error surfacing (A2), the dead JS/UI removed
+(A4), cookie auth + support matrix (P6), presets + config (P7), and run-history +
+baseline diff (P9). Per your decisions: **S1** history-purge/rotation is not being
+done, **Q9** multi-framework is closed as **PHP-by-design** (docs made honest), and
+**A1** is resolved by striking the false "AST/guaranteed" wording + surfacing parse
+coverage (a full tree-sitter rewrite stays future work).
 
 ---
 

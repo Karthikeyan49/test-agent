@@ -94,6 +94,24 @@ phase-by-phase walkthrough).
 Run `python3 cli.py <command> --help` for all flags. Reports export as
 `json`, `html`, or `junit` (CI-consumable) via `--format`.
 
+## Supported integration surface
+
+| Dimension | Supported | Notes |
+|---|---|---|
+| **Target stack** | **PHP + React primary** (deterministically verified). Route detection also for Django/Flask/FastAPI/NestJS/Spring/Rails/Go. | The full oracle stack is validated on the PHP target; other stacks are route-detection-deep. |
+| **Auth** | bearer **token** (`--auth-token`), **login** (`--auth-login-url`), **session cookie** (`--auth-cookie`) | OAuth2/OIDC/SAML not yet built. For authz/IDOR tests, supply two role credentials. |
+| **Database** | SQLite, PostgreSQL, MySQL | relational only (no NoSQL) |
+| **API style** | REST | GraphQL not yet parsed |
+| **AI provider** | local (ollama) by default; external (Groq/OpenAI-compatible) **only with explicit consent** (`SYSTEMINTEL_AI_ALLOW_EXTERNAL=1`) | AI never decides pass/fail |
+
+Common invocations (presets and config keep the 30+ flags manageable):
+
+```bash
+python3 cli.py test --graph graph.json --preset smoke   # fast, API-only
+python3 cli.py test --graph graph.json --preset deep     # field-blackbox + scenarios
+python3 cli.py test --graph graph.json --config systemintel.yaml   # flag defaults from YAML
+```
+
 ## Documentation
 
 - [`SYSTEMINTEL_CONTEXT.md`](SYSTEMINTEL_CONTEXT.md) — architecture & design
@@ -106,9 +124,13 @@ Run `python3 cli.py <command> --help` for all flags. Reports export as
 ```
 cli.py          # entry point (scan / test / query / agent)
 backend/        # the deterministic engine (canonical implementation)
+tests/          # aggregated self-test suite (pytest) + CI
 test-ecosudar/  # bundled demo target (PHP+React ERP) + docker stack
-src/            # legacy browser bundle — NOT the supported surface
+src/sample_erp/ # small demo repo used by the quickstart examples
 ```
+
+> SystemIntel is **CLI/backend only** — there is no web UI. (An earlier,
+> unmaintained browser bundle was removed; the CLI is the one canonical surface.)
 
 ## License
 

@@ -63,3 +63,6 @@ systemintel_testdb*
 Thumbs.db
 .idea/
 .vscode/
+
+# SystemIntel run-history
+.systemintel_runs.jsonl

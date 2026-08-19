@@ -10,7 +10,31 @@ Constructs graph from parsed analysis, provides:
 """
 
 import json
+import re
 from typing import Dict, Any, List, Set, Tuple, Optional
+
+
+def _normalize_api_path(p: str) -> str:
+    """Normalize a route for cross-layer matching: collapse path params to {id}
+    and strip a leading api/version prefix (/api, /api/v1, /v2, /rest ...)."""
+    p = re.sub(r'\{[^}]+\}|:[A-Za-z_]\w*', '{id}', p or '')
+    p = p.strip().rstrip('/')
+    p = re.sub(r'^/?(?:api|rest)(?:/v?\d+)?', '', p, flags=re.IGNORECASE)
+    p = re.sub(r'^/?v\d+(?=/)', '', p, flags=re.IGNORECASE)
+    if not p.startswith('/'):
+        p = '/' + p
+    return p.lower()
+
+
+def _api_path_match(ep_path: str, call_endpoint: str) -> bool:
+    """True if a frontend call endpoint refers to the same route as a declared
+    endpoint, tolerating a differing base-path prefix (exact match still counts)."""
+    if (ep_path or '') == (call_endpoint or ''):
+        return True
+    a, b = _normalize_api_path(ep_path), _normalize_api_path(call_endpoint)
+    if not a or not b or a == '/' or b == '/':
+        return a == b
+    return a == b or a.endswith(b) or b.endswith(a)
 
 
 class SystemGraphBuilder:
@@ -101,7 +125,11 @@ class SystemGraphBuilder:
                 if call.get("pageId") == field.get("pageId"):
                     matching_ep = next(
                         (ep for ep in analysis.get("apiEndpoints", [])
-                         if ep["path"] == call["endpoint"]),
+                         # Q4b: match across a base-path boundary — a frontend call
+                         # to /api/v1/customers should bind to a declared /customers
+                         # endpoint. Previously exact-equality never fired across the
+                         # /api/v1 prefix, so static SUBMITS_TO was ~0 without a HAR.
+                         if _api_path_match(ep["path"], call["endpoint"])),
                         None
                     )
                     if matching_ep:
@@ -323,14 +351,22 @@ class SystemGraphBuilder:
                 frontier.extend(out.get((cur, "CALLS"), []))
             return tables
 
+        # Q4b: make every probe value UNIQUE per run so the DB assertion matches
+        # the row THIS test just created, not a pre-existing or re-run row. The
+        # cross-layer check (`equals` + expectedRowsCount:1) then proves the
+        # specific write persisted unchanged, instead of "some row with 4242 exists".
+        import secrets
+        _tok   = secrets.token_hex(3)                 # e.g. 'a1b2c3'
+        _nonce = 900000000 + secrets.randbelow(99_999_999)
+
         def _value_for(col):
             nm = col.lower()
-            if 'email' in nm: return 'xlayer@test.com'
+            if 'email' in nm: return f'xlayer+{_tok}@test.com'   # still a valid, unique email
             if 'date' in nm:  return '2026-01-01'
             if any(k in nm for k in ('amount', 'price', 'qty', 'quantity', 'limit',
                                      'balance', 'salary', 'count', 'stock', 'total')):
-                return '4242'
-            return 'XL_' + col
+                return str(_nonce)                              # unique numeric
+            return f'XL_{col}_{_tok}'                            # unique text
 
         tests, n = [], 0
         for node in self.nodes.values():
@@ -565,3 +601,30 @@ class SystemGraphBuilder:
         for n in self.nodes.values():
             type_counts[n["type"]] = type_counts.get(n["type"], 0) + 1
         return type_counts
+
+
+if __name__ == "__main__":
+    # ── Self-test: Q4b base-path matching + a static SUBMITS_TO end-to-end ─────
+    assert _api_path_match("/customers", "/api/v1/customers")
+    assert _api_path_match("/api/v1/customers", "/customers")
+    assert _api_path_match("/orders/{id}", "/api/orders/:id")
+    assert _api_path_match("/customers", "/customers")
+    assert not _api_path_match("/customers", "/vendors")
+    assert not _api_path_match("/orders", "/invoices")
+
+    # A frontend call to /api/v1/customers must bind (SUBMITS_TO) to a declared
+    # /customers endpoint across the base-path boundary.
+    analysis = {
+        "pages": [{"id": "p1", "name": "CustomerPage", "route": "/customers"}],
+        "fields": [{"id": "f_email", "fieldName": "email", "pageId": "p1"}],
+        "apiCalls": [{"pageId": "p1", "method": "POST", "endpoint": "/api/v1/customers"}],
+        "apiEndpoints": [{"id": "ep1", "method": "POST", "path": "/customers",
+                          "controllerName": "CustomerController"}],
+        "components": [], "dbResult": {"tables": [], "foreign_keys": []},
+    }
+    gb = SystemGraphBuilder()
+    gb.build_from_analysis(analysis)
+    submits = [e for e in gb.edges if e["relationship"] == "SUBMITS_TO"]
+    assert submits, "static SUBMITS_TO should fire across the /api/v1 base-path boundary"
+    print(f"[self-test] static SUBMITS_TO edges: {len(submits)}")
+    print("SELF-TEST PASS (Q4b base-path SUBMITS_TO)")

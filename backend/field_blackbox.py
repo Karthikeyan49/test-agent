@@ -179,6 +179,12 @@ def generate_field_blackbox_tests(graph_data: Dict[str, Any],
         n[0] += 1
         a = {"type": "API", "method": method, "endpoint": ep_str}
         a.update(status_expect)   # expectedStatusClass or expectedStatusIn
+        # Q5: record which field carries the single injected fault, so the runner
+        # can check the 4xx actually names it (else the rejection may be unrelated
+        # — auth, CSRF, content-type — masking an unenforced rule).
+        if col and col != "*" and case not in ("smoke",):
+            a["faultField"] = col
+            a["faultCase"]  = case
         tests.append({
             "id":         f"FBB-{n[0]:04d}",
             "title":      f"[Field-{case}] {method} {table}.{col} — {note}",

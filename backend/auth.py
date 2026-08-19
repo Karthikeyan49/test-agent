@@ -41,6 +41,10 @@ class AuthManager:
         self.scheme: str  = cfg.get("scheme", "Bearer")
         self.timeout: float = float(cfg.get("timeout", 10.0))
 
+        # P6: session-cookie mode — many apps (PHP sessions, Django, Rails) use a
+        # cookie, not a bearer token. Supply e.g. cookie="PHPSESSID=abc123".
+        self.cookie: Optional[str] = cfg.get("cookie")
+
         # Populated after a successful login() / from a static token
         self.token: Optional[str] = None
         if self.mode == "token" and self.static_token:
@@ -61,6 +65,9 @@ class AuthManager:
         """
         if self.mode == "none":
             return None
+
+        if self.mode == "cookie":
+            return None  # cookie is sent via auth_headers(); no token to fetch
 
         if self.mode == "token":
             self.token = self.static_token
@@ -118,14 +125,16 @@ class AuthManager:
 
     def auth_headers(self) -> Dict[str, str]:
         """Return the header dict to merge into outgoing requests, or {}."""
+        if self.mode == "cookie" and self.cookie:
+            return {"Cookie": self.cookie}
         if not self.token:
             return {}
         value = f"{self.scheme} {self.token}".strip()
         return {self.header: value}
 
     def is_active(self) -> bool:
-        """True when a usable token is currently available."""
-        return bool(self.token)
+        """True when a usable credential (token or cookie) is available."""
+        return bool(self.token) or bool(self.mode == "cookie" and self.cookie)
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -207,5 +216,11 @@ if __name__ == "__main__":
     assert none_mgr.auth_headers() == {}, none_mgr.auth_headers()
     assert none_mgr.is_active() is False
     print("[self-test] none mode → no auth OK")
+
+    # (4) mode="cookie" → session cookie sent as a Cookie header (P6)
+    cookie_mgr = AuthManager({"mode": "cookie", "cookie": "PHPSESSID=abc123"})
+    assert cookie_mgr.auth_headers() == {"Cookie": "PHPSESSID=abc123"}, cookie_mgr.auth_headers()
+    assert cookie_mgr.is_active() is True
+    print("[self-test] cookie mode → Cookie header OK")
 
     print("SELF-TEST PASS")

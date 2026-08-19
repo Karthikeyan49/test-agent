@@ -11,6 +11,16 @@ import time
 from typing import Dict, Any, List, Optional
 
 
+def _body_text_lower(resp: Any) -> str:
+    """Lowercased text of a response body (dict/list serialized) for keyword scans."""
+    if isinstance(resp, str):
+        return resp.lower()
+    try:
+        return json.dumps(resp, default=str).lower()
+    except Exception:
+        return str(resp).lower()
+
+
 class HTTPRunner:
     def __init__(self, base_url: str = "http://localhost:3000", timeout: float = 10.0,
                  transport=None):
@@ -167,6 +177,29 @@ class HTTPRunner:
 
             passed = status_ok and body_ok
 
+            # Q5: for a single-fault negative that got its expected 4xx, check the
+            # response actually references the injected field. If not, the 4xx may
+            # be an UNRELATED rejection (auth/CSRF/content-type) — record it as
+            # unattributed so a genuinely unenforced rule isn't hidden behind a
+            # coincidental 4xx. Advisory only (apps that return generic errors
+            # shouldn't false-FAIL), surfaced in the result for honest reporting.
+            fault_field = assertion.get('faultField')
+            attribution = None
+            if fault_field and 400 <= (actual_status or 0) < 500:
+                import re as _re_q5
+                blob = _body_text_lower(resp_body)
+                names = {fault_field.lower(),
+                         _re_q5.sub(r'[^a-z0-9]', '', fault_field.lower())}
+                attributed = any(nm and nm in blob for nm in names)
+                attribution = {
+                    "faultField": fault_field,
+                    "confirmed":  attributed,
+                    "note": (f"4xx references '{fault_field}' — rejection attributable to the injected fault"
+                             if attributed else
+                             f"4xx did NOT reference '{fault_field}' — may be an unrelated rejection; "
+                             "per-rule validation not confirmed"),
+                }
+
             result.update({
                 "actualStatus":       actual_status,
                 "expectedStatus":     expected_status,
@@ -174,6 +207,7 @@ class HTTPRunner:
                 "statusMatched":      status_ok,
                 "bodyMatched":        body_ok,
                 "bodyMismatch":       body_mismatch_detail,
+                "attribution":        attribution,
                 "passed":             passed,
                 "durationMs":         duration_ms,
                 "error":              None,
@@ -258,4 +292,19 @@ if __name__ == "__main__":
         {"type": "API", "endpoint": "POST http://evil.example/steal"})
     assert r.get("passed") is False and "off-origin" in (r.get("error") or ""), r
 
-    print("http_runner SELF-TEST PASS (Q2 auth-skip + S7 off-origin)")
+    # Q5: a negative that got 4xx but whose body names the injected field →
+    #     attribution confirmed; one that does not → flagged unattributed.
+    def _mock_body(status, body):
+        return httpx.MockTransport(lambda req: httpx.Response(status, json=body))
+
+    r = HTTPRunner(transport=_mock_body(422, {"errors": {"email": "invalid"}})).run_assertion(
+        {"type": "API", "endpoint": "POST /vendors",
+         "expectedStatusClass": "4xx", "faultField": "email"})
+    assert r["attribution"]["confirmed"] is True, r["attribution"]
+
+    r = HTTPRunner(transport=_mock_body(400, {"message": "Bad Request"})).run_assertion(
+        {"type": "API", "endpoint": "POST /vendors",
+         "expectedStatusClass": "4xx", "faultField": "email"})
+    assert r["attribution"]["confirmed"] is False, r["attribution"]
+
+    print("http_runner SELF-TEST PASS (Q2 auth-skip + S7 off-origin + Q5 attribution)")

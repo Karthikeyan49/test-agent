@@ -8,17 +8,21 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-REPO="/home/karthikeyan/vscode/test-ecosudar"
-GRAPH="$REPO/system_graph.json"
-SQL="$REPO/database/u952547820_test (1).sql"   # explicit schema (filename has spaces)
 TOOL_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$TOOL_DIR"
 
+# Target repo is configurable; defaults to the bundled demo target (repo-relative).
+REPO="${1:-./test-ecosudar}"
+GRAPH="${SYSTEMINTEL_GRAPH:-./system_graph.json}"
+SQL="$REPO/database/u952547820_test (1).sql"   # explicit schema (filename has spaces)
+
 # ── AI (Groq, OpenAI-compatible) ─────────────────────────────────────────────
-# Key is read from the environment if already set; otherwise falls back to the
-# value below. Prefer:  export SYSTEMINTEL_AI_API_KEY=gsk_...   (keep it out of git)
+# Running this uses an EXTERNAL LLM → SYSTEMINTEL_AI_ALLOW_EXTERNAL=1 is explicit
+# consent to third-party egress (S5). For private code, use a local provider.
+# Key is read from the environment. Prefer:  export SYSTEMINTEL_AI_API_KEY=gsk_...
 export SYSTEMINTEL_AI_PROVIDER=openai
 export SYSTEMINTEL_AI_BASE_URL=https://api.groq.com/openai
+export SYSTEMINTEL_AI_ALLOW_EXTERNAL=1
 export SYSTEMINTEL_AI_MODEL="${SYSTEMINTEL_AI_MODEL:-qwen/qwen3.6-27b}"   # or openai/gpt-oss-120b
 export SYSTEMINTEL_AI_API_KEY="${SYSTEMINTEL_AI_API_KEY:?Set your Groq key first:  export SYSTEMINTEL_AI_API_KEY=gsk_...}"
 
@@ -44,7 +48,7 @@ python3 cli.py query "give me the connection of ProductController" --graph "$GRA
 echo -e "\n== [3/4] Test generation (offline — nothing live is hit) =="
 python3 cli.py test --graph "$GRAPH" --no-browser \
     --base-url http://localhost:3000 \
-    --format html --output "$REPO/SystemIntel_Report.html"
+    --format html --output ./SystemIntel_Report.html
 
 # To run REAL assertions, stand up a LOCAL copy first, then uncomment & fill in:
 #   1. serve the PHP api/ locally      (e.g. php -S localhost:8000 -t api)
@@ -59,4 +63,4 @@ python3 cli.py test --graph "$GRAPH" --no-browser \
 echo -e "\n== [4/4] Autonomous agent =="
 python3 cli.py agent "Which controller handles orders, what routes point to it, and what DB tables does the order workflow touch?" --graph "$GRAPH"
 
-echo -e "\nDone. Graph: $GRAPH  |  Report: $REPO/SystemIntel_Report.html"
+echo -e "\nDone. Graph: $GRAPH  |  Report: ./SystemIntel_Report.html"

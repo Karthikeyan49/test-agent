@@ -1,10 +1,8 @@
 # SystemIntel Platform — CLI Reference
 
 SystemIntel runs entirely via the command line (`cli.py`) or the optional REST API
-(`backend/main.py`). See the root `README.md` for install and quickstart.
-
-> Note: a legacy browser bundle (`index.html` / `src/`) exists in the repo but is
-> **not** part of the supported product surface — the CLI/backend is canonical.
+(`backend/main.py`). See the root `README.md` for install and quickstart. There is
+no web UI — the CLI/backend is the one canonical surface.
 
 ## Commands (verified against `cli.py`)
 

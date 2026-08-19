@@ -30,6 +30,22 @@ _RX_GO_ROUTE       = re.compile(r'\.\s*(GET|POST|PUT|DELETE|PATCH|HandleFunc)\(\
 _RX_STRING_LIT     = re.compile(r'["\']([^"\']+)["\']')
 
 
+# A2: parse errors were previously swallowed with `except: pass`, so a file that
+# failed to parse silently vanished from the graph — which was then presented as
+# complete. Collect them here and surface a coverage warning after a scan, so a
+# missing edge is never mistaken for "no such link exists".
+PARSE_ERRORS: List[Dict[str, str]] = []
+
+
+def _record_parse_error(where: str, exc: Exception, file_path: str = "") -> None:
+    PARSE_ERRORS.append({"where": where, "file": file_path or "?",
+                         "error": f"{type(exc).__name__}: {exc}"})
+
+
+def get_parse_errors() -> List[Dict[str, str]]:
+    return list(PARSE_ERRORS)
+
+
 class PythonSystemIntelligenceEngine:
 
     # ─── SQL Schema Parser ────────────────────────────────────────────────────
@@ -523,8 +539,8 @@ class PythonSystemIntelligenceEngine:
                         "filePath": "openapi.yaml",
                         "lineStart": 1
                     })
-        except Exception:
-            pass
+        except Exception as e:
+            _record_parse_error("openapi_endpoints", e)
         return endpoints
 
     def parse_test_file(self, file: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -555,7 +571,8 @@ class PythonSystemIntelligenceEngine:
             return traces
         try:
             har = json.loads(content)
-        except Exception:
+        except Exception as e:
+            _record_parse_error("har_parse", e, file.get('name', ''))
             return traces
 
         for e in har.get('log', {}).get('entries', []):

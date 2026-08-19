@@ -229,6 +229,19 @@ def cmd_scan(args):
     if api_eps:
         print(f"  {DIM}APIs:{RESET}   " + "  |  ".join(f"{e['method']} {e['path']}" for e in api_eps[:6]))
 
+    # A2: surface any swallowed parse errors so a partial graph is never mistaken
+    # for a complete one — a missing edge could be a dropped file, not "no link".
+    try:
+        from engine import get_parse_errors
+        _perrs = get_parse_errors()
+    except Exception:
+        _perrs = []
+    if _perrs:
+        print(f"\n  {YELLOW}⚠ {len(_perrs)} file(s) failed to parse and were skipped "
+              f"— the graph may be INCOMPLETE:{RESET}")
+        for pe in _perrs[:8]:
+            print(f"    {DIM}- [{pe['where']}] {pe['file']}: {pe['error']}{RESET}")
+
     # Export
     output_path = args.output or "system_graph.json"
     export_data = {
@@ -309,7 +322,9 @@ def cmd_scan(args):
 def _build_auth(args, base_url):
     """Construct an AuthManager from the --auth-* flags (token / login / none)."""
     from auth import AuthManager
-    if getattr(args, 'auth_token', None):
+    if getattr(args, 'auth_cookie', None):
+        auth = AuthManager({"mode": "cookie", "cookie": args.auth_cookie})
+    elif getattr(args, 'auth_token', None):
         auth = AuthManager({"mode": "token", "static_token": args.auth_token})
     elif getattr(args, 'auth_login_url', None):
         auth = AuthManager({"mode": "login", "login_url": args.auth_login_url,
@@ -560,9 +575,78 @@ def run_scenario_mode(args, graph_data):
     sys.exit(1 if f else 0)
 
 
+def _record_run_history(report, history_file=None):
+    """P9: append a compact run summary to a JSONL history file and print the
+    delta vs. the previous run — the baseline for differential/regression checks."""
+    path = history_file or ".systemintel_runs.jsonl"
+    s = report.get("summary", {})
+    entry = {
+        "timestamp": report.get("timestamp"),
+        "baseUrl":   report.get("baseUrl"),
+        "total":     s.get("total"), "passed": s.get("passed"),
+        "failed":    s.get("failed"), "skipped": s.get("skipped"),
+        "executed":  s.get("executed"), "passRate": s.get("passRate"),
+    }
+    prev = None
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                lines = [ln for ln in f if ln.strip()]
+            if lines:
+                prev = json.loads(lines[-1])
+        except Exception:
+            prev = None
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, default=str) + "\n")
+
+    if prev:
+        def _d(k):
+            a, b = prev.get(k) or 0, entry.get(k) or 0
+            delta = b - a
+            return f"{b} ({'+' if delta >= 0 else ''}{delta} vs last)"
+        newly_failed = (entry.get("failed") or 0) - (prev.get("failed") or 0)
+        col = RED if newly_failed > 0 else GREEN
+        print(f"{col}[Δ] vs previous run — passed {_d('passed')}, failed {_d('failed')}, "
+              f"skipped {_d('skipped')}{RESET}")
+        if newly_failed > 0:
+            print(f"{RED}    ⚠ regression: {newly_failed} more failing than last run{RESET}")
+    else:
+        print(f"{DIM}[i] run-history baseline recorded at {path}{RESET}")
+
+
+def _apply_config_and_preset(args):
+    """P7: apply a YAML config file and/or a named preset as DEFAULTS. An explicit
+    CLI flag always wins (we only fill values the user left at their default)."""
+    # (1) YAML config file — keys map to arg names (dashes or underscores).
+    if getattr(args, "config", None):
+        try:
+            import yaml
+            with open(args.config) as f:
+                cfg = yaml.safe_load(f) or {}
+            for k, v in cfg.items():
+                attr = k.replace("-", "_")
+                if hasattr(args, attr) and getattr(args, attr) in (None, False):
+                    setattr(args, attr, v)
+            print(f"{GREEN}[✓] Loaded config defaults from {args.config}{RESET}")
+        except Exception as e:
+            print(f"{YELLOW}[!] Could not load --config {args.config}: {e}{RESET}")
+
+    # (2) Named presets fill common flags (only where still unset).
+    preset = getattr(args, "preset", None)
+    if preset == "smoke":
+        if not getattr(args, "no_browser", False): args.no_browser = True
+    elif preset == "deep":
+        if not getattr(args, "field_blackbox", False): args.field_blackbox = True
+        if not getattr(args, "scenarios", False):      args.scenarios = True
+    if preset:
+        print(f"{GREEN}[✓] Applied '{preset}' preset{RESET}")
+
+
 def cmd_test(args):
     print_banner()
     section("Evidence-Based Test Generation")
+
+    _apply_config_and_preset(args)
 
     repo_path = os.path.abspath(args.path) if args.path else None
     engine    = PythonSystemIntelligenceEngine()
@@ -750,7 +834,9 @@ def cmd_test(args):
 
     # Auth (optional) — obtain/carry a token so protected endpoints become testable
     from auth import AuthManager
-    if getattr(args, 'auth_token', None):
+    if getattr(args, 'auth_cookie', None):
+        auth = AuthManager({"mode": "cookie", "cookie": args.auth_cookie})
+    elif getattr(args, 'auth_token', None):
         auth = AuthManager({"mode": "token", "static_token": args.auth_token})
     elif getattr(args, 'auth_login_url', None):
         auth = AuthManager({"mode": "login", "login_url": args.auth_login_url,
@@ -1117,6 +1203,14 @@ def cmd_test(args):
 
     print(f"\n{GREEN}[✓] Full report saved to: {output_path}{RESET}\n")
 
+    # ── P9: run-history + baseline diff ─────────────────────────────────────
+    # Append this run's summary to a history file and show the delta vs the
+    # previous run (the "regression / differential" baseline the roadmap needs).
+    try:
+        _record_run_history(report, getattr(args, "history_file", None))
+    except Exception as e:
+        print(f"{DIM}[i] run-history not updated: {e}{RESET}")
+
     # CI exit code: non-zero only on genuine failures (skips never fail the pipeline)
     try:
         from reporters import exit_code
@@ -1340,6 +1434,7 @@ Examples:
     tp.add_argument("--field-blackbox", action="store_true", help="DEPTH: generate the full per-field black-box battery (required/type/format/length/enum/boundary/fuzz-robustness) for every writable field. NOTE: the fuzz-robustness case only asserts the server does not 5xx on a hostile-looking string — it is NOT a vulnerability/injection check.")
     tp.add_argument("--field-blackbox-max", type=int, default=4000, help="Cap on per-field black-box cases (default: 4000)")
     tp.add_argument("--auth-token",     help="Static bearer token sent on every request (test protected endpoints)")
+    tp.add_argument("--auth-cookie",    help="Session cookie sent on every request, e.g. 'PHPSESSID=abc123' (for cookie/session auth instead of a bearer token)")
     tp.add_argument("--auth-login-url", help="Login URL/path to obtain a token before testing")
     tp.add_argument("--auth-user",      help="Username for --auth-login-url")
     tp.add_argument("--auth-pass",      help="Password for --auth-login-url")
@@ -1351,6 +1446,9 @@ Examples:
     tp.add_argument("--db-password",  help="(PostgreSQL/MySQL) database password")
     tp.add_argument("--format",       choices=["json", "html", "junit"], default="json", help="Report format (default: json)")
     tp.add_argument("--output",       default="SystemIntel_Report.json", help="Report output path (default: SystemIntel_Report.json)")
+    tp.add_argument("--preset", choices=["smoke", "deep"], help="Convenience preset: 'smoke' = fast API-only pass (no browser); 'deep' = field-blackbox + scenarios. Explicit flags still override.")
+    tp.add_argument("--config", help="Path to a YAML config file whose keys set defaults for test flags (explicit CLI flags override).")
+    tp.add_argument("--history-file", help="JSONL run-history file (default: .systemintel_runs.jsonl). Each run appends a summary and prints the delta vs the previous run.")
     tp.add_argument("--allow-nonlocal-writes", action="store_true", help="SAFETY: permit mutating requests (POST/PUT/PATCH/DELETE) against a NON-local --base-url. Off by default — use ONLY on a disposable staging target you control, NEVER production.")
     tp.add_argument("--include-response-bodies", action="store_true", help="Keep live HTTP response bodies in the saved report (redacted by default, since they can contain PII/tokens).")
 

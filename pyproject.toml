@@ -27,6 +27,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0.0"]
+# A9: GraphRAG's semantic retrieval needs sentence-transformers. Without this
+# extra it degrades to deterministic lexical (keyword) retrieval — install with
+# `pip install -e .[rag]` to enable embeddings.
+rag = ["sentence-transformers>=2.2.0,<4.0.0"]
 
 [project.scripts]
 systemintel = "cli:main"

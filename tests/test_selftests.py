@@ -22,7 +22,10 @@ BACKEND = Path(__file__).resolve().parent.parent / "backend"
 OFFLINE_SELFTEST_MODULES = [
     "metamorphic",          # generator + executor (Q1)
     "injection_oracle",     # differential SQLi / XSS (S2)
-    "http_runner",          # auth-skip (Q2) + off-origin guard (S7)
+    "authz_oracle",         # IDOR / privilege differential
+    "auth",                 # token/login/cookie (P6)
+    "ai_provider",          # external-egress policy (S5)
+    "http_runner",          # auth-skip (Q2) + off-origin guard (S7) + attribution (Q5)
     "db_runner",
     "mutation",
     "field_blackbox",
@@ -42,6 +45,7 @@ OFFLINE_SELFTEST_MODULES = [
     "graph_builder",
     "engine",
     "file_scanner",
+    "graph_builder",        # Q4b base-path SUBMITS_TO
 ]
 
 

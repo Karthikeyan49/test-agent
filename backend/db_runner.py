@@ -213,10 +213,15 @@ class DBRunner:
                     msg = str(ie).lower()
                     if 'no such' in msg or 'unknown' in msg or 'does not exist' in msg:
                         cursor.close()
-                        result.update({"passed": True, "skipped": True,
+                        # Q8: an invariant we could not evaluate is UNKNOWN, not a
+                        # pass. Mark passed=None + skipped so it is excluded from the
+                        # pass count and reported honestly as "not verified" rather
+                        # than silently inflating green.
+                        result.update({"passed": None, "skipped": True,
+                                       "status": "unknown",
                                        "checkType": "invariant",
                                        "invariant": assertion.get('invariant', ''),
-                                       "reason": f"not applicable: {ie}",
+                                       "reason": f"not verified — table/column absent in this DB: {ie}",
                                        "durationMs": round(time.time() * 1000 - start_ms, 2)})
                         self.result_log.append(result)
                         return result

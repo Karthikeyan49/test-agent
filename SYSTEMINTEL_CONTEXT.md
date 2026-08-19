@@ -11,6 +11,11 @@ Modern enterprise software systems—like ERPs, CRMs, and complex SaaS platforms
 
 When humans test or debug these systems, they must manually build a mental model of this entire chain. SystemIntel automates this entirely.
 
+> **Scope note (honest):** the engine is **primarily built and validated for PHP + React**
+> applications (the bundled `test-ecosudar` target). Route detection exists for several other
+> frameworks, but the full multi-layer oracle stack is proven on the PHP stack; treat other
+> stacks as experimental until validated on a second target. See the support matrix in `README.md`.
+
 The objective of SystemIntel is to ingest:
 1.  **Frontend Source Code** (React, Vue, HTML, etc.)
 2.  **Backend Source Code** (Node.js, Python, Java, etc.)
@@ -34,13 +39,20 @@ Large Language Models (LLMs) are exceptionally powerful at reasoning, but they a
 If the foundational map of the system is hallucinated, all subsequent automated tests and root-cause analyses will be flawed.
 
 ### 2.2 The Deterministic Foundation (Systematic Parsing)
-To solve this, SystemIntel strictly forbids the use of AI for building the System Graph. 
-Instead, the graph is constructed **100% systematically and deterministically** using:
-*   **Abstract Syntax Tree (AST) Parsing:** To structurally understand code.
-*   **Regular Expressions (Regex):** To identify specific frameworks and patterns.
-*   **Static Code Analysis:** To trace imports and function calls.
+To solve this, SystemIntel strictly forbids the use of AI for building the System Graph.
+Instead, the graph is constructed **systematically and deterministically** using:
+*   **Regular-expression / pattern-based static analysis:** the current parser (`backend/engine.py`)
+    is regex-driven (not a full AST). It recognises common framework conventions to extract
+    routes, controllers, SQL, fields, and FK constraints.
+*   **SQL DDL parsing:** `CREATE TABLE` / `FOREIGN KEY` extraction for the ERD.
+*   **Static tracing** of controller → service → repository chains and inline SQL.
 
-Because the graph is built systematically, it is guaranteed to be accurate. If an edge exists in the System Graph linking `CustomerPage.jsx` to `CustomerController.ts`, it is because a definitive, traceable line of code established that link.
+Because the graph is built from the source (never a model's recall), an edge that **exists** is
+grounded in a matched line of code. **Honest caveat:** regex parsing has coverage limits — code
+that deviates from the recognised conventions can be missed, so a **missing** edge does not prove
+"no such link exists". Files that fail to parse are now surfaced as a coverage warning after a
+scan (rather than silently dropped), and moving to a real AST / `tree-sitter` backend is tracked
+as future work. Treat the graph as high-precision, best-effort-recall — not provably complete.
 
 ### 2.3 The AI Layer (Reasoning on top of Facts)
 AI (powered by local models like Ollama/vLLM or external APIs like OpenAI) is introduced *only after* the deterministic graph is built. The AI acts as a reasoning engine constrained by hard facts.

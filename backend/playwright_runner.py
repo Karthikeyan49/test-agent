@@ -171,6 +171,11 @@ class PlaywrightRunner:
 
             nav_ok = False
             fields_filled, fields_missed = 0, 0
+            submit_fired = False
+            # Does this test intend to exercise a form workflow (fill + submit)?
+            intends_workflow = bool(fill_targets) or any(
+                any(k in s.get('action', '').lower() for k in ('click', 'submit', 'confirm'))
+                for s in steps)
             for step in steps:
                 step_num   = step.get('step', '?')
                 action     = step.get('action', '').lower()
@@ -255,6 +260,7 @@ class PlaywrightRunner:
                                     break
                         if loc is not None and loc.count() > 0:
                             loc.click(timeout=3000)
+                            submit_fired = True
                             result["stepLogs"].append(f"{log_prefix} Clicked submit")
                         else:
                             result["stepLogs"].append(f"{log_prefix} SKIP click — no button matched")
@@ -356,8 +362,32 @@ class PlaywrightRunner:
             except Exception:
                 pass
 
-            # A UI test passes if the page navigated AND all UI assertions held.
-            # Field fills are best-effort (component selectors vary) and never fail it.
+            # Q6: a workflow test must actually EXERCISE the workflow to PASS — a
+            # "renders" check alone (form mounted) is not success if no field was
+            # filled and no submit fired. When the test intended a form workflow
+            # but couldn't complete it (0 fields filled or submit never fired), the
+            # honest verdict is SKIPPED (precondition unmet — selectors didn't map),
+            # never a green "it works". A functional post-condition (a success
+            # assertion here, or a linked API/DB check the caller runs) still
+            # decides real correctness.
+            has_text_assertion = any(
+                ar.get("check") not in ("renders", "accessibility") and "selector" in ar
+                for ar in assertion_results)
+            result["submitFired"] = submit_fired
+            if intends_workflow and not has_text_assertion and (fields_filled == 0 or not submit_fired):
+                result.update({
+                    "passed":  False,
+                    "skipped": True,
+                    "error":   (f"workflow not exercised (fieldsFilled={fields_filled}, "
+                                f"submitFired={submit_fired}) — UI selectors didn't map; "
+                                "not a functional pass"),
+                    "uiAssertions":  assertion_results,
+                    "consoleErrors": self.console_errors[:],
+                    "durationMs":    round(time.time() * 1000 - start_ms, 2),
+                })
+                return result
+
+            # Otherwise: passes if the page navigated AND all UI assertions held.
             result.update({
                 "passed":           bool(nav_ok and all_passed),
                 "uiAssertions":     assertion_results,

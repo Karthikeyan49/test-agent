@@ -41,11 +41,42 @@ class AIProvider:
     def is_enabled(self) -> bool:
         return self.config.get("enabled", True) and self.config.get("provider") != "disabled"
 
+    # ── S5: third-party data-egress policy ────────────────────────────────
+    def _is_external(self) -> bool:
+        """True when the configured base_url is NOT a local host — i.e. sending a
+        prompt would ship repo source/schema to a third party (Groq/OpenAI/…)."""
+        from urllib.parse import urlparse
+        host = (urlparse(self.config.get("base_url", "")).hostname or "").lower()
+        return host not in ("localhost", "127.0.0.1", "::1", "") and not host.endswith(".local")
+
+    def _external_consent(self) -> bool:
+        if self.config.get("allow_external"):
+            return True
+        return os.environ.get("SYSTEMINTEL_AI_ALLOW_EXTERNAL", "").lower() in ("1", "true", "yes")
+
+    def egress_allowed(self) -> bool:
+        """Local providers: always allowed. External: only with explicit consent."""
+        return (not self._is_external()) or self._external_consent()
+
     # ── Core LLM Call ─────────────────────────────────────────────────────
 
     def _call_llm(self, prompt: str, system_prompt: str = "") -> Optional[str]:
         """Make real HTTP call to Ollama/vLLM/OpenAI, retrying with backoff on 429."""
         if not self.is_enabled():
+            return None
+
+        # S5: refuse to send repo content to a third-party host unless the operator
+        # explicitly consented. Default provider is local (ollama); an external
+        # base_url requires SYSTEMINTEL_AI_ALLOW_EXTERNAL=1 (or allow_external in
+        # config). This prevents silent exfiltration of source/schema.
+        if not self.egress_allowed():
+            if not getattr(self, "_egress_warned", False):
+                host = self.config.get("base_url", "")
+                print(f"\n[AI] BLOCKED: refusing to send repo content to external host "
+                      f"'{host}'. Use a local provider (ollama) or set "
+                      f"SYSTEMINTEL_AI_ALLOW_EXTERNAL=1 to consent.")
+                self._egress_warned = True
+            self._log("llm_call", prompt[:100], 0, "BLOCKED_EXTERNAL_EGRESS")
             return None
 
         provider = self.config["provider"]
@@ -230,3 +261,24 @@ class AIProvider:
 
     def get_logs(self) -> List[Dict]:
         return self.request_log
+
+
+if __name__ == "__main__":
+    # ── S5 egress-policy self-test (offline) ──────────────────────────────────
+    # Local provider → egress allowed.
+    p = AIProvider({"provider": "ollama", "base_url": "http://localhost:11434"})
+    assert p.egress_allowed() is True
+
+    # External provider, no consent → blocked; _call_llm returns None without a request.
+    p = AIProvider({"provider": "openai", "base_url": "https://api.groq.com/openai/v1"})
+    assert p._is_external() is True
+    assert p.egress_allowed() is False
+    assert p._call_llm("send my source code") is None
+    assert any(r["status"] == "BLOCKED_EXTERNAL_EGRESS" for r in p.get_logs())
+
+    # External provider WITH explicit consent → allowed (would then attempt a call).
+    p = AIProvider({"provider": "openai", "base_url": "https://api.groq.com/openai/v1",
+                    "allow_external": True})
+    assert p.egress_allowed() is True
+
+    print("ai_provider SELF-TEST PASS (S5 external-egress policy)")
