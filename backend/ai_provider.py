@@ -133,6 +133,31 @@ class AIProvider:
                     )
                     resp.raise_for_status()
                     answer = resp.json()["choices"][0]["message"]["content"]
+
+                elif provider == "gemini":
+                    # Google Gemini native generateContent API. Key travels in the
+                    # x-goog-api-key header (never the URL/query, so it stays out of
+                    # logs). base_url defaults to the public endpoint.
+                    gbase = base_url or "https://generativelanguage.googleapis.com"
+                    url = f"{gbase}/v1beta/models/{model}:generateContent"
+                    payload = {
+                        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                        "generationConfig": {
+                            "temperature":     self.config.get("temperature", 0.2),
+                            "maxOutputTokens": self.config.get("max_tokens", 2048),
+                        },
+                    }
+                    if system_prompt:
+                        payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+                    resp = httpx.post(url, headers={"x-goog-api-key": self.config.get("api_key", ""),
+                                                    "Content-Type": "application/json"},
+                                      json=payload, timeout=120.0)
+                    resp.raise_for_status()
+                    cands = resp.json().get("candidates") or []
+                    answer = ""
+                    if cands:
+                        parts = (cands[0].get("content") or {}).get("parts") or []
+                        answer = "".join(p.get("text", "") for p in parts)
                 else:
                     return None
 
@@ -374,4 +399,12 @@ if __name__ == "__main__":
     # S5 is untouched: the external-no-consent provider never actually egressed.
     assert p.egress_allowed() is False
 
-    print("ai_provider SELF-TEST PASS (S5 external-egress policy + offline-rag fallback)")
+    # ── gemini provider is external → S5-gated; blocked without consent (offline) ──
+    g = AIProvider({"provider": "gemini", "model": "gemini-3.6-flash",
+                    "base_url": "https://generativelanguage.googleapis.com", "api_key": "x"})
+    assert g._is_external() is True, "public Gemini endpoint must be treated as external"
+    assert g.egress_allowed() is False, "gemini must be blocked without SYSTEMINTEL_AI_ALLOW_EXTERNAL"
+    assert g._call_llm("hello") is None, "no external call may be made without consent"
+    assert any(r["status"] == "BLOCKED_EXTERNAL_EGRESS" for r in g.get_logs())
+
+    print("ai_provider SELF-TEST PASS (S5 external-egress policy + offline-rag fallback + gemini gate)")
