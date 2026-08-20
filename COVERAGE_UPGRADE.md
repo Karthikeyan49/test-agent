@@ -86,6 +86,20 @@ audit. Two fixes made this work:
 Still bounded: data-heavy pages depend on the API returning rows, and coverage across *every*
 page/field is a breadth exercise — but the browser path is proven end-to-end on real pages.
 
+**Full breadth run (`scripts/ui_breadth.py`).** The whole SPA was then swept: all **65
+concrete routes** (of 91 declared; param/glob routes excluded) driven after a single login.
+Result: **65/65 rendered, 0 bounced to login, 0 errors**; **51 pages carried forms**;
+**209 controls** detected and **404 per-field UI black-box cases** run live (oversize /
+wrong-type → does the frontend signal validation?). **170 fields signalled validation, 92
+did not** (the no-signal fields are mostly search/filter boxes — candidate findings for
+triage, not automatic bugs). WCAG audit ran on every page. Reproducible:
+
+```
+python3 scripts/ui_breadth.py --ui-base-url http://127.0.0.1:5174 \
+   --app-tsx test-ecosudar/eco-sudar-control/src/App.tsx \
+   --email admin@demo.local --password 'Test1234!' --out ui_breadth_report.json
+```
+
 ## 5 · Mutation at repo scale
 
 **`backend/mutation.py`.** Added repo-wide **discovery** (`discover_mutants`,
@@ -178,15 +192,15 @@ or `--combinatorial`) runs.
 
 ## Honest remaining gaps
 
-1. **UI breadth** — the browser path is proven end-to-end (real login + five protected
-   pages audited), but exhaustive per-page / per-field UI coverage (and data-backed pages
-   needing seeded rows) is a breadth exercise still to be widened. This is *volume of
-   runs*, not a missing capability.
+All three items open after the first pass are now closed:
 
-**Now closed (were open in the first pass):**
-- ✅ *Oracles on the flat `test` path* — done via the per-write read-back pass above.
-- ✅ *Fast live mutation score* — done via `--mutate-scope auto`; the endpoint-hang
-  blocker is removed by only running the mutated file's own checks.
+- ✅ **UI breadth** — all 65 concrete routes swept live (65/65 rendered, 51 forms, 404
+  per-field cases) via `scripts/ui_breadth.py` (§4). What remains is only deeper
+  data-state seeding so every list/detail page is fully populated — *volume of runs*, not
+  a missing capability.
+- ✅ **Oracles on the flat `test` path** — auto-invoked per write (read-back + DB row).
+- ✅ **Fast live mutation score** — `--mutate-scope auto` removes the endpoint-hang
+  blocker; 5 controllers scored live. A whole-repo score is now just more runtime.
 
 ## Verification
 
