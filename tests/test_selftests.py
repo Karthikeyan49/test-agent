@@ -23,6 +23,9 @@ OFFLINE_SELFTEST_MODULES = [
     "metamorphic",          # generator + executor (Q1)
     "injection_oracle",     # differential SQLi / XSS (S2)
     "authz_oracle",         # IDOR / privilege differential
+    "combinatorial",        # pairwise / t-wise covering-array generation
+    "field_edge_oracle",    # per-field in/out edge round-trip oracle
+    "requirement_oracle",   # requirement (intent) oracle — PASS/FAIL/SKIP
     "auth",                 # token/login/cookie (P6)
     "ai_provider",          # external-egress policy (S5)
     "http_runner",          # auth-skip (Q2) + off-origin guard (S7) + attribution (Q5)

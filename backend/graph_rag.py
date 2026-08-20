@@ -51,8 +51,42 @@ _STOPWORDS: Set[str] = {
 # Metadata keys worth folding into a node's searchable document, in priority
 # order. filePath first because file paths are the strongest lexical anchor.
 _SEARCHABLE_META_KEYS: Tuple[str, ...] = (
-    "filePath", "routePath", "path", "method", "dataType",
+    "filePath", "routePath", "path", "method", "dataType", "ragText",
 )
+
+
+def page_docs_to_nodes(page_docs: Any) -> List[Dict[str, Any]]:
+    """Turn a page-docs corpus into synthetic PageDoc nodes so the RAG index treats
+    each page's name / route / form fields / use-cases as a first-class retrievable
+    document (tagged source="page_docs"). Accepts the {"pages":[...]} corpus or a bare
+    list of page dicts (as produced by backend/page_docs.py load_page_docs)."""
+    if not page_docs:
+        return []
+    pages = page_docs.get("pages", page_docs) if isinstance(page_docs, dict) else page_docs
+    nodes: List[Dict[str, Any]] = []
+    for i, p in enumerate(pages or []):
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or p.get("route") or p.get("file") or f"page{i}")
+        fields = [f.get("name") if isinstance(f, dict) else f for f in (p.get("fields") or [])]
+        fields = [str(f) for f in fields if f]
+        use_cases = [str(u) for u in (p.get("use_cases") or p.get("useCases") or []) if u]
+        endpoints = [str(e) for e in (p.get("endpoints") or []) if e]
+        rag_text = " ".join([name] + fields + use_cases + endpoints)
+        nodes.append({
+            "id": f"pagedoc::{name}::{i}",
+            "name": name,
+            "type": "PageDoc",
+            "metadata": {
+                "routePath": p.get("route") or p.get("routePath") or "",
+                "ragText": rag_text,
+                "fields": fields,
+                "useCases": use_cases,
+                "endpoints": endpoints,
+                "source": "page_docs",
+            },
+        })
+    return nodes
 
 # camelCase boundary: a lower/digit immediately followed by an upper.
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
@@ -94,10 +128,13 @@ class GraphRAGIndex:
         produced by graph_builder.SystemGraphBuilder.export()/to_dict().
     """
 
-    def __init__(self, graph_data: Dict[str, Any]):
+    def __init__(self, graph_data: Dict[str, Any], page_docs: Any = None):
         self.graph_data: Dict[str, Any] = graph_data or {}
         self.nodes: List[Dict[str, Any]] = list(self.graph_data.get("nodes", []))
         self.edges: List[Dict[str, Any]] = list(self.graph_data.get("edges", []))
+        # Fold the page-docs corpus in as first-class PageDoc documents so RAG
+        # retrieval is grounded on the page-wise .md knowledge, not only the graph.
+        self.nodes.extend(page_docs_to_nodes(page_docs))
 
         # id -> node, for O(1) lookup during neighborhood expansion.
         self.node_by_id: Dict[str, Dict[str, Any]] = {}
@@ -357,7 +394,7 @@ class GraphRAGIndex:
 
 
 def retrieve_context(graph_data: Dict[str, Any], query: str,
-                     max_chars: int = 4000) -> str:
+                     max_chars: int = 4000, page_docs: Any = None) -> str:
     """Convenience: build an index and return just the context string.
 
     This is the drop-in the agent uses in place of the full graph dump.
@@ -372,7 +409,7 @@ def retrieve_context(graph_data: Dict[str, Any], query: str,
         Hard cap on the returned context length; longer output is truncated
         with a trailing "...[truncated]..." marker.
     """
-    index = GraphRAGIndex(graph_data).build()
+    index = GraphRAGIndex(graph_data, page_docs=page_docs).build()
     context = index.retrieve(query)["context"]
     if len(context) > max_chars:
         marker = "\n...[truncated]..."
@@ -441,5 +478,22 @@ if __name__ == "__main__":
             f"context {len(context)} exceeds max_chars {MAX_CHARS}"
         )
         print(f"  context length : {len(context)} chars (<= {MAX_CHARS})")
+
+    # ── page-docs ingestion: a page's form fields / use-cases become retrievable ──
+    pd = {"pages": [{"name": "Checkout", "route": "/checkout",
+                     "fields": ["coupon_code", "shipping_address"],
+                     "use_cases": ["apply a coupon code at checkout"],
+                     "endpoints": ["POST /checkout"]}]}
+    pidx = GraphRAGIndex(graph, page_docs=pd).build()
+    # a query using ONLY page-doc vocabulary (absent from the graph) must retrieve
+    # the PageDoc node — proving the corpus is genuinely indexed, not ignored.
+    res = pidx.retrieve("coupon code checkout")
+    hit = [pidx.node_by_id[i] for i in res["node_ids"]
+           if pidx.node_by_id[i].get("type") == "PageDoc"]
+    assert hit, "page-docs content was not retrievable (RAG did not ingest the corpus)"
+    assert hit[0]["metadata"].get("source") == "page_docs", hit[0]
+    ctx = retrieve_context(graph, "coupon code checkout", page_docs=pd)
+    assert "Checkout" in ctx or "checkout" in ctx.lower(), ctx
+    print(f"page-docs RAG: retrieved PageDoc node '{hit[0]['name']}' from page-docs vocabulary")
 
     print("\nSELF-TEST PASS")

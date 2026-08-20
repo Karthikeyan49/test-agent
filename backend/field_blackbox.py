@@ -460,6 +460,103 @@ def generate_contract_negative_tests(graph_data: Dict[str, Any],
     return tests
 
 
+# ── Honest field-coverage accounting ──────────────────────────────────────────
+# The two generators above deliberately SKIP fields they can't ground (an endpoint
+# whose table is ambiguous, a field with no contract). That is the right call for
+# correctness — a test against the wrong table is worse than none — but it hides
+# the true denominator: "how many of the system's fields did we actually exercise?"
+# This report makes that explicit. It enumerates the UNION of every field the
+# System Graph knows about — DB writable columns, request-contract fields, and page
+# form fields from the page-docs corpus — and marks each COVERED (a black-box
+# battery was generated for it) or UNCOVERED, with the concrete reason. It answers,
+# truthfully, the question "did you test every field, and if not, which and why?".
+
+def _page_form_fields(page_docs: Optional[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """(page, field) pairs declared as form inputs in the page-docs corpus.
+    Accepts either the {"pages":[...]} corpus or a bare list of page dicts."""
+    if not page_docs:
+        return []
+    pages = page_docs.get("pages", page_docs) if isinstance(page_docs, dict) else page_docs
+    out: List[Tuple[str, str]] = []
+    for p in (pages or []):
+        if not isinstance(p, dict):
+            continue
+        pname = str(p.get("name") or p.get("route") or p.get("file") or "page")
+        for f in (p.get("fields") or []):
+            fname = f.get("name") if isinstance(f, dict) else f
+            if fname:
+                out.append((pname, str(fname)))
+    return out
+
+
+def field_coverage_report(graph_data: Dict[str, Any],
+                          page_docs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Enumerate every known field and classify it as covered / uncovered.
+
+    Returns:
+      {total, covered, uncovered, coverage,
+       bySource: {db, contract, page_docs},
+       uncoveredFields: [{field, source, reason}, ...]}
+    A field is COVERED when at least one of the two generators emits a battery for
+    it. UNCOVERED fields carry the reason (table unresolved, UI-only field with no
+    endpoint binding, structural id/timestamp column, etc.) so the gap is visible."""
+    schema_tests   = generate_field_blackbox_tests(graph_data)
+    contract_tests = generate_contract_negative_tests(graph_data)
+    covered: set = set()
+    for t in schema_tests + contract_tests:
+        for ev in t.get("sourceEvidence", []) or []:
+            fld = ev.get("field")
+            if fld and not fld.endswith(".*"):
+                covered.add(_norm(fld.split(".")[-1]))
+
+    known: List[Tuple[str, str, str]] = []   # (display, source, norm)
+    # DB writable columns
+    for t in (graph_data.get("dbTables") or []):
+        tn = t.get("name") or t.get("id") or "table"
+        for c in (t.get("columns") or []):
+            cn = c.get("name")
+            if cn and not _SKIP_NAME.search(str(cn)) and not c.get("isPrimaryKey"):
+                known.append((f"{tn}.{cn}", "db", _norm(cn)))
+    # contract fields
+    for c in (graph_data.get("requestContracts") or []):
+        ep = c.get("endpoint", "?")
+        for f in (c.get("fields") or []):
+            fn = f.get("name")
+            if fn:
+                known.append((f"{ep}:{fn}", "contract", _norm(fn)))
+    # page-docs form fields
+    for pname, fn in _page_form_fields(page_docs):
+        known.append((f"{pname}:{fn}", "page_docs", _norm(fn)))
+
+    by_source = {"db": 0, "contract": 0, "page_docs": 0}
+    uncovered: List[Dict[str, str]] = []
+    seen: set = set()
+    for disp, src, nrm in known:
+        by_source[src] = by_source.get(src, 0) + 1
+        key = (src, nrm)
+        if key in seen:
+            continue
+        seen.add(key)
+        if nrm not in covered:
+            reason = {
+                "db": "no black-box battery — endpoint→table lineage unresolved or field is structural",
+                "contract": "field declared no checkable validation rule",
+                "page_docs": "UI-only field with no resolved API/DB binding (needs browser or contract)",
+            }.get(src, "uncovered")
+            uncovered.append({"field": disp, "source": src, "reason": reason})
+
+    uniq_known = len(seen)
+    uniq_cov   = sum(1 for (s, nrm) in seen if nrm in covered)
+    return {
+        "total": uniq_known,
+        "covered": uniq_cov,
+        "uncovered": len(uncovered),
+        "coverage": round(uniq_cov / uniq_known, 3) if uniq_known else 0.0,
+        "bySource": by_source,
+        "uncoveredFields": uncovered[:200],
+    }
+
+
 if __name__ == "__main__":
     graph = {
         "apiEndpoints": [{"id": "api_ep_POST__vendors", "method": "POST", "path": "/vendors",
@@ -572,5 +669,23 @@ if __name__ == "__main__":
     _cp = [t for t in cneg if t["subtype"] == "positive"]
     print(f"contract tests: {len(_cn)} negative + {len(_cp)} positive "
           f"from {len(cgraph.get('requestContracts', []))} contracts")
+
+    # ── field-coverage report (honest denominator incl. page-docs UI fields) ──
+    _pd = {"pages": [{"name": "Contact", "route": "/contact",
+                      "fields": [{"name": "email"}, {"name": "phone_number"}]}]}
+    rep = field_coverage_report(cgraph, page_docs=_pd)
+    assert rep["total"] >= 3, rep
+    assert 0.0 <= rep["coverage"] <= 1.0, rep
+    assert rep["covered"] + rep["uncovered"] == rep["total"], rep
+    # `email` is a contract field with rules → COVERED; the UI-only `phone_number`
+    # from page-docs has no binding → it must surface as UNCOVERED with a reason.
+    _unc = {u["field"].split(":")[-1] for u in rep["uncoveredFields"]}
+    assert "phone_number" in _unc, f"UI-only field should be reported uncovered: {rep}"
+    assert rep["bySource"]["page_docs"] == 2, rep
+    print(f"field-coverage: {rep['covered']}/{rep['total']} covered "
+          f"({rep['coverage']*100:.0f}%), {rep['uncovered']} uncovered "
+          f"[db={rep['bySource']['db']} contract={rep['bySource']['contract']} "
+          f"page_docs={rep['bySource']['page_docs']}]")
+    print("field_blackbox SELF-TEST PASS")
 
     print("SELF-TEST PASS")

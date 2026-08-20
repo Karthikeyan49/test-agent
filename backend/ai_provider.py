@@ -12,6 +12,7 @@ import httpx
 import json
 import time
 import os
+import re
 from typing import Dict, Any, List, Optional
 
 
@@ -248,6 +249,79 @@ class AIProvider:
             return {"analysis": ai_response, "source": "AI", "confidence": 0.85}
         return {"analysis": None, "source": "FALLBACK", "confidence": 0.0}
 
+    # ── RAG-grounded scenario proposals ───────────────────────────────────
+
+    def propose_scenarios_with_rag(self, target: str, rag_context: str,
+                                   max_items: int = 8) -> Dict[str, Any]:
+        """Propose candidate test scenarios for `target`, GROUNDED on retrieved
+        page-docs / graph RAG context.
+
+        Two honest paths:
+          • a model is reachable AND egress is allowed  → send the RAG context in the
+            prompt, return the LLM proposals tagged ai=True, source="llm".
+          • otherwise (no model, or S5 blocks external egress) → return DETERMINISTIC
+            proposals derived straight from the RAG context, tagged ai=False,
+            source="offline-rag". These are clearly NOT a model's output — the caller
+            (and the reader) must never mistake offline-rag for "the model said".
+
+        Either way the deterministic engine still decides pass/fail — proposals are
+        only candidate scenarios to run, never verdicts."""
+        system_prompt = (
+            "You are a QA test designer. Using ONLY the provided system context "
+            "(pages, form fields, endpoints, tables), propose grounded end-to-end "
+            "test scenarios. Return a JSON array of {name, page, endpoint, fields}."
+        )
+        prompt = (f"Target: {target}\n\nSystem context (retrieved via RAG):\n"
+                  f"{rag_context}\n\nPropose up to {max_items} grounded scenarios.")
+
+        if self.is_enabled() and self.egress_allowed():
+            ai_response = self._call_llm(prompt, system_prompt)
+            if ai_response:
+                try:
+                    start, end = ai_response.find('['), ai_response.rfind(']') + 1
+                    if start >= 0 and end > start:
+                        items = json.loads(ai_response[start:end])
+                        if isinstance(items, list):
+                            return {"ai": True, "source": "llm",
+                                    "proposals": items[:max_items]}
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                return {"ai": True, "source": "llm",
+                        "proposals": [{"name": "AI proposal", "raw": ai_response}]}
+            # model unreachable at call time → fall through to offline derivation.
+
+        proposals = self._offline_rag_proposals(rag_context, max_items)
+        return {"ai": False, "source": "offline-rag",
+                "reason": ("no model reachable or external egress not consented "
+                           "(S5) — proposals derived deterministically from the RAG "
+                           "context, NOT from a language model"),
+                "proposals": proposals}
+
+    @staticmethod
+    def _offline_rag_proposals(rag_context: str, max_items: int) -> List[Dict[str, Any]]:
+        """Deterministically mine candidate scenarios from the retrieved RAG context.
+        Grounded by construction: every proposal names an endpoint / page / field that
+        literally appears in the context, so nothing is invented."""
+        endpoints = re.findall(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[^\s,]*)", rag_context)
+        proposals: List[Dict[str, Any]] = []
+        seen: set = set()
+        for method, path in endpoints:
+            key = (method, path)
+            if key in seen:
+                continue
+            seen.add(key)
+            verb = {"POST": "create via", "PUT": "update via", "PATCH": "update via",
+                    "DELETE": "delete via", "GET": "read via"}.get(method, "exercise")
+            proposals.append({
+                "name": f"{verb} {method} {path}",
+                "endpoint": f"{method} {path}",
+                "grounding": "endpoint present in retrieved RAG context",
+                "source": "offline-rag",
+            })
+            if len(proposals) >= max_items:
+                break
+        return proposals
+
     # ── Logging ───────────────────────────────────────────────────────────
 
     def _log(self, purpose: str, snippet: str, latency_ms: int, status: str):
@@ -283,4 +357,21 @@ if __name__ == "__main__":
                     "allow_external": True})
     assert p.egress_allowed() is True
 
-    print("ai_provider SELF-TEST PASS (S5 external-egress policy)")
+    # ── RAG offline fallback: no model reachable → deterministic, honestly labelled ──
+    ctx = ("PAGES:\n  - Checkout (/checkout) [fields: coupon_code]\n"
+           "API ENDPOINTS:\n  - POST /checkout\n  - GET /orders\n")
+    # A local-but-unreachable provider (is_enabled True, call returns None) OR an
+    # external-no-consent provider (egress blocked) must BOTH yield offline-rag, never
+    # a fabricated 'model said' proposal.
+    p = AIProvider({"provider": "openai", "base_url": "https://api.groq.com/openai/v1"})
+    out = p.propose_scenarios_with_rag("test the checkout flow", ctx)
+    assert out["ai"] is False and out["source"] == "offline-rag", out
+    eps = {pr["endpoint"] for pr in out["proposals"]}
+    assert "POST /checkout" in eps and "GET /orders" in eps, out
+    # every offline proposal is grounded in an endpoint that literally appears in ctx.
+    for pr in out["proposals"]:
+        assert pr["endpoint"].split(" ", 1)[1] in ctx, pr
+    # S5 is untouched: the external-no-consent provider never actually egressed.
+    assert p.egress_allowed() is False
+
+    print("ai_provider SELF-TEST PASS (S5 external-egress policy + offline-rag fallback)")
