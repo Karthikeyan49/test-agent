@@ -82,6 +82,12 @@ class AIProvider:
             self._log("llm_call", prompt[:100], 0, "BLOCKED_EXTERNAL_EGRESS")
             return None
 
+        # Gemini has per-MODEL free-tier quotas (RPM/TPM/RPD), so a quota 429 on one
+        # model does not mean the key is spent — rotate to another model instead of
+        # erroring. Handled in its own method.
+        if self.config["provider"] == "gemini":
+            return self._call_gemini(prompt, system_prompt)
+
         provider = self.config["provider"]
         base_url = self.config["base_url"].rstrip("/")
         model    = self.config["model"]
@@ -133,31 +139,6 @@ class AIProvider:
                     )
                     resp.raise_for_status()
                     answer = resp.json()["choices"][0]["message"]["content"]
-
-                elif provider == "gemini":
-                    # Google Gemini native generateContent API. Key travels in the
-                    # x-goog-api-key header (never the URL/query, so it stays out of
-                    # logs). base_url defaults to the public endpoint.
-                    gbase = base_url or "https://generativelanguage.googleapis.com"
-                    url = f"{gbase}/v1beta/models/{model}:generateContent"
-                    payload = {
-                        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                        "generationConfig": {
-                            "temperature":     self.config.get("temperature", 0.2),
-                            "maxOutputTokens": self.config.get("max_tokens", 2048),
-                        },
-                    }
-                    if system_prompt:
-                        payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
-                    resp = httpx.post(url, headers={"x-goog-api-key": self.config.get("api_key", ""),
-                                                    "Content-Type": "application/json"},
-                                      json=payload, timeout=120.0)
-                    resp.raise_for_status()
-                    cands = resp.json().get("candidates") or []
-                    answer = ""
-                    if cands:
-                        parts = (cands[0].get("content") or {}).get("parts") or []
-                        answer = "".join(p.get("text", "") for p in parts)
                 else:
                     return None
 
@@ -202,6 +183,141 @@ class AIProvider:
                 self._log("llm_call", prompt[:100], 0, f"ERROR: {e}")
                 return None
 
+        return None
+
+    # ── Gemini: multi-model rotation on per-model quota (RPM/TPM/RPD) ──────
+    # Curated preference order (fast/cheap first). Any name the key can't use
+    # (retired / not-available → 404/400) is skipped automatically at call time,
+    # so an over-broad list is safe. Override with SYSTEMINTEL_AI_MODELS (CSV).
+    _GEMINI_FALLBACK_CHAIN = [
+        "gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+        "gemini-2.0-flash-lite", "gemini-flash-latest",
+        "gemini-1.5-flash", "gemini-1.5-flash-8b",
+    ]
+
+    def _gemini_models(self) -> List[str]:
+        """The ordered model chain to try. Cached. Sources, in priority:
+        SYSTEMINTEL_AI_MODELS (CSV) → live ListModels discovery (generateContent-capable)
+        → the configured single model + the curated fallback chain."""
+        if getattr(self, "_gmodels", None):
+            return self._gmodels
+        env = os.environ.get("SYSTEMINTEL_AI_MODELS", "").strip()
+        if env:
+            chain = [m.strip() for m in env.split(",") if m.strip()]
+        else:
+            chain = list(self._discover_gemini_models())
+        # Always seed with the explicitly-configured model first (deduped).
+        cfg = self.config.get("model")
+        seed = [cfg] if cfg and cfg != "auto" else []
+        seen, ordered = set(), []
+        for m in seed + chain + self._GEMINI_FALLBACK_CHAIN:
+            if m and m not in seen:
+                seen.add(m); ordered.append(m)
+        self._gmodels = ordered
+        return ordered
+
+    def _discover_gemini_models(self) -> List[str]:
+        """Query ListModels for models this key can call with generateContent. Flash /
+        lite first (fast, generous free quota), then the rest. Empty list on failure —
+        the curated fallback chain then applies."""
+        base = (self.config.get("base_url") or "https://generativelanguage.googleapis.com").rstrip("/")
+        try:
+            r = httpx.get(f"{base}/v1beta/models",
+                          headers={"x-goog-api-key": self.config.get("api_key", "")}, timeout=20.0)
+            r.raise_for_status()
+            # Exclude non-text modalities (tts/audio/image/vision) and non-generative
+            # models — they'd waste a rotation or return unusable output.
+            _skip = ("tts", "image", "audio", "embedding", "vision", "aqa", "learnlm")
+            models = []
+            for m in r.json().get("models", []):
+                name = m.get("name", "").split("/")[-1]
+                methods = m.get("supportedGenerationMethods") or []
+                if "generateContent" in methods and not any(s in name.lower() for s in _skip):
+                    models.append(name)
+            flash = [m for m in models if "flash" in m.lower() or "lite" in m.lower()]
+            rest  = [m for m in models if m not in flash]
+            return flash + rest
+        except Exception:
+            return []
+
+    def _call_gemini(self, prompt: str, system_prompt: str = "") -> Optional[str]:
+        """Call Gemini generateContent, rotating models on quota/availability errors.
+
+        On HTTP 429 the current model is marked exhausted for this run and the next
+        model in the chain is tried immediately (each model has its own RPM/TPM/RPD
+        budget). A transient rate hint (retry-after / non-quota 429) gets one short
+        backoff on the same model first. 404/400 → model unavailable → skip it. Only
+        when EVERY model in the chain is exhausted does it give up and return None."""
+        base = (self.config.get("base_url") or "https://generativelanguage.googleapis.com").rstrip("/")
+        key = self.config.get("api_key", "")
+        exhausted = getattr(self, "_gexhausted", None)
+        if exhausted is None:
+            exhausted = self._gexhausted = set()
+        payload_base = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature":     self.config.get("temperature", 0.2),
+                "maxOutputTokens": self.config.get("max_tokens", 2048),
+            },
+        }
+        if system_prompt:
+            payload_base["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        models = [m for m in self._gemini_models() if m not in exhausted]
+        if not models:
+            self._log("llm_call", prompt[:100], 0, "ALL_MODELS_EXHAUSTED")
+            return None
+
+        for model in models:
+            for attempt in range(2):   # at most one transient backoff per model
+                start = time.time()
+                try:
+                    resp = httpx.post(f"{base}/v1beta/models/{model}:generateContent",
+                                      headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                                      json=payload_base, timeout=120.0)
+                    resp.raise_for_status()
+                    cands = resp.json().get("candidates") or []
+                    answer = ""
+                    if cands:
+                        parts = (cands[0].get("content") or {}).get("parts") or []
+                        answer = "".join(p.get("text", "") for p in parts)
+                    latency = round((time.time() - start) * 1000)
+                    self._log("llm_call", f"[{model}] {prompt[:80]}", latency, "OK")
+                    if getattr(self, "_gactive", None) != model:
+                        self._gactive = model
+                        print(f"[AI] gemini model → {model}")
+                    return (answer or "").strip()
+                except httpx.HTTPStatusError as e:
+                    code = e.response.status_code
+                    body = ""
+                    try: body = e.response.text[:200]
+                    except Exception: pass
+                    if code == 429:
+                        is_quota = "quota" in body.lower() or "exhaust" in body.lower()
+                        retry_after = e.response.headers.get("retry-after")
+                        if not is_quota and attempt == 0:
+                            # transient RPM/TPM: one short backoff, same model
+                            try: wait = float(retry_after) if retry_after else 5.0
+                            except (TypeError, ValueError): wait = 5.0
+                            self._log("llm_call", f"[{model}]", 0, "RETRY_429")
+                            time.sleep(min(wait, 15)); continue
+                        exhausted.add(model)
+                        self._log("llm_call", f"[{model}]", 0, "QUOTA_ROTATE")
+                        print(f"[AI] {model} quota hit (429) — rotating to next model")
+                        break   # next model
+                    if code in (400, 404):
+                        exhausted.add(model)
+                        self._log("llm_call", f"[{model}]", 0, f"UNAVAILABLE_{code}")
+                        break   # model not usable → next
+                    if code in (500, 502, 503, 529) and attempt == 0:
+                        time.sleep(3); continue
+                    self._log("llm_call", f"[{model}]", 0, f"HTTP_{code}")
+                    break
+                except (httpx.ConnectError, httpx.TimeoutException) as e:
+                    self._log("llm_call", f"[{model}]", 0, f"NET: {type(e).__name__}")
+                    break
+        self._log("llm_call", prompt[:100], 0, "ALL_MODELS_EXHAUSTED")
+        print("[AI] all Gemini models exhausted for this run")
         return None
 
     # ── Workflow Discovery ────────────────────────────────────────────────
