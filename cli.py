@@ -336,6 +336,75 @@ def _build_auth(args, base_url):
     return auth
 
 
+def _controller_tokens(file_path):
+    """Resource tokens implied by a controller file name, e.g.
+    ProductController.php -> {'product', 'products'} (+ camelCase split)."""
+    import re as _re
+    base = os.path.basename(file_path)
+    base = _re.sub(r'\.php$', '', base, flags=_re.IGNORECASE)
+    base = _re.sub(r'Controller$', '', base)
+    words = [w.lower() for w in _re.findall(r'[A-Z]?[a-z0-9]+', base) if w]
+    toks = set()
+    for w in words:
+        if len(w) < 3:
+            continue
+        toks.add(w)
+        toks.add(w + 's')
+        toks.add(w.rstrip('s'))
+    return toks, base
+
+
+def _scope_api_units_to_files(api_units, files, args):
+    """Restrict the mutation suite to only the endpoints the MUTATED files serve, so
+    each suite re-run is small and fast instead of hammering all ~595 checks (many of
+    which hang to timeout and are irrelevant to the mutated code). Resolution order:
+      1. the graph's controllerName -> endpoints mapping (exact), when a graph is loaded;
+      2. otherwise a resource-token heuristic from the controller file name.
+    Returns (scoped_units, description). Falls back to the full set if nothing matches."""
+    scope = getattr(args, 'mutate_scope', 'auto')
+    if scope == 'all':
+        return api_units, "all endpoints (--mutate-scope all)"
+
+    in_scope_endpoints = set()   # {"POST /products", ...}
+    used_graph = False
+    gpath = getattr(args, 'graph', None)
+    if gpath and os.path.isfile(gpath):
+        try:
+            with open(gpath) as fh:
+                g = json.load(fh)
+            want_controllers = set()
+            for f in files:
+                _t, base = _controller_tokens(f)
+                want_controllers.add(base.lower())
+            for ep in (g.get("apiEndpoints", []) or []):
+                cn = str(ep.get("controllerName") or ep.get("controller") or "")
+                cn = re.sub(r'Controller$', '', cn).lower()
+                if cn and cn in want_controllers:
+                    in_scope_endpoints.add(f"{(ep.get('method') or 'GET').upper()} {ep.get('path','')}")
+            if in_scope_endpoints:
+                used_graph = True
+        except Exception:
+            in_scope_endpoints = set()
+
+    def _unit_in_scope(u):
+        ep = u.get("endpoint", "")
+        if used_graph:
+            return ep in in_scope_endpoints
+        # heuristic: the endpoint path contains a resource token of a mutated file
+        path = ep.split(" ", 1)[1].lower() if " " in ep else ep.lower()
+        for f in files:
+            toks, _b = _controller_tokens(f)
+            if any(t in path for t in toks):
+                return True
+        return False
+
+    scoped = [u for u in api_units if _unit_in_scope(u)]
+    if not scoped:
+        return api_units, "all endpoints (no scoped match found — falling back)"
+    how = "graph controllerName" if used_graph else "resource-name heuristic"
+    return scoped, f"{len(scoped)} endpoint(s) served by the mutated file(s) [{how}]"
+
+
 def run_mutation_mode(args, test_cases):
     """
     Mutation testing against a LIVE app: inject one small bug at a time into each
@@ -419,8 +488,15 @@ def run_mutation_mode(args, test_cases):
             seen.add(key)
             api_units.append({**a, "body": body, "headers": auth_headers})
 
+    # Scope the suite to the mutated file's own endpoints — a mutant in
+    # ProductController can only be caught by /products checks, so running the
+    # other ~590 checks (many of which hang to timeout) is pure wasted time.
+    _full = len(api_units)
+    api_units, _scope_desc = _scope_api_units_to_files(api_units, files, args)
+
     section("Mutation Testing — does the suite actually catch injected bugs?")
-    print(f"{CYAN}[+] Target files: {len(files)}  |  distinct API checks per run: {len(api_units)}{RESET}")
+    print(f"{CYAN}[+] Target files: {len(files)}  |  API checks per run: {len(api_units)} "
+          f"of {_full}  |  scope: {_scope_desc}{RESET}")
     for f in files:
         print(f"    {DIM}• {os.path.relpath(f)}{RESET}")
 
@@ -1693,6 +1769,7 @@ Examples:
     tp.add_argument("--mutate-budget", type=int, default=50, help="Repo-wide mutation: max mutants to actually execute from the discovered catalog (default: 50). Each executed mutant re-runs the whole suite, so this bounds wall-clock time.")
     tp.add_argument("--mutate-per-file-cap", type=int, default=0, help="Repo-wide mutation: cap mutants executed per file so one huge file can't dominate the sample (0 = no cap).")
     tp.add_argument("--mutate-time-budget", type=float, default=0, help="Repo-wide mutation: soft wall-clock cap in seconds (0 = none).")
+    tp.add_argument("--mutate-scope", default="auto", help="Which endpoints the mutation suite re-runs per mutant: 'auto' (default) = only the endpoints the mutated file serves (fast, via the graph's controller→endpoint map or a resource-name heuristic); 'all' = every endpoint (slow). A mutant is only catchable by checks that exercise its code, so 'auto' gives the same kills far faster.")
     tp.add_argument("--mutate-reset-url", help="URL to hit between mutants to reset a server-side code cache (default: {base_url}/clear-cache.php; falls back to a timed wait)")
     tp.add_argument("--openapi",      help="Path to an OpenAPI/Swagger spec — derive contract tests (happy path, required-field negatives, documented errors)")
     tp.add_argument("--explore",      action="store_true", help="[experimental] AI proposes edge-case scenarios (grounded on the graph) that templates miss")
