@@ -69,11 +69,22 @@ Field matching is case/separator-insensitive (`orderId` ≡ `order_id`).
   a deterministic **offline-rag** result tagged `ai=False, source="offline-rag"` — so it
   is never mistaken for "the model said". S5 egress policy is untouched.
 
-## 4 · UI black-box breadth — *not closed this run*
+## 4 · UI black-box breadth — *now run live*
 
-No code gap, but honestly **not executed**: it needs the React SPA built and served.
-Every live run here used `--no-browser`. Getting the SPA up is the remaining work to
-actually exercise the in-browser field-validation / WCAG / form-fill on all pages.
+The React SPA (`test-ecosudar/eco-sudar-control`, Vite) was `npm install`ed and served on
+`:5174`, pointed at the live PHP API. Using the tool's own `PlaywrightRunner` + `ui_audits`,
+the browser **drove the real login form** (fill + submit → authenticated, left `/login`) and
+then rendered + audited protected pages live: `/dashboard`, `/products`, `/admin/employees`,
+`/admin/invoices`, `/orders` — each with field/button/link detection and a WCAG accessibility
+audit. Two fixes made this work:
+- **`playwright_runner`**: launch Chromium via `PLAYWRIGHT_CHROMIUM_PATH` / a conventional
+  `/opt/pw-browsers/chromium` symlink when the pinned Playwright browser build isn't present
+  (portability fix for pre-provisioned images).
+- **CORS** (test-app config, not tool code): the API's `CORS_ORIGIN` (`.env`) was set to the
+  Vite origin so the browser could complete the login round-trip.
+
+Still bounded: data-heavy pages depend on the API returning rows, and coverage across *every*
+page/field is a breadth exercise — but the browser path is proven end-to-end on real pages.
 
 ## 5 · Mutation at repo scale
 
@@ -131,16 +142,32 @@ or `--combinatorial`) runs.
   a bad payload is a **candidate missing-validation finding** for human triage (some may
   be false positives; that is the wider surface, not a verdict).
 - **Field coverage:** 451/622 = 72%.
-- **Mutation:** 5,965 discovered (census); live kill/survive execution was **stopped
-  early** (baseline suite too slow against timing-out endpoints), so no live kill count
-  this run — kill mechanics are proven by the offline self-test only.
+- **Mutation:** 5,965 discovered (census). A **live kill count** was obtained with a
+  scoped, fast oracle (4 product-only checks vs the 595-check full suite, which was too
+  slow against timing-out endpoints): ProductController — 30 mutants discovered, 10
+  executed, **2 killed / 8 survived = 20%**, survivors listed by line + operator, tree
+  restored byte-for-byte. (20% reflects the deliberately thin oracle; a full-suite oracle
+  scores higher — the point was a real *live* kill count.)
+- **UI browser:** the SPA was served and the tool's browser path drove the real login +
+  audited five protected pages live (see §4).
+
+## Follow-up wiring done after the first pass
+
+- **Edge + requirement oracles are now auto-invoked** by `scenario_runner` on every
+  scenario run: it feeds the submitted body → DB row → read-back evidence it already
+  collects into `field_edge_oracle` and `requirement_oracle`, attaching verdicts under
+  `result["oracleFindings"]` (strictly additive — never changes the scenario's own
+  PASS/FAIL). Covered by a new self-test (harness now 30/30).
 
 ## Honest remaining gaps
 
-1. **UI browser on all pages** — not run; needs the SPA served.
-2. **A completed live mutation kill count** — needs a faster endpoint set or a longer window.
-3. **Wiring depth for #2 and #3** — the requirement + RAG-offline oracles are built and
-   self-tested but not yet auto-invoked in every per-assertion pass of the default runner.
+1. **UI breadth** — the browser path is proven end-to-end, but exhaustive per-page /
+   per-field UI coverage (and data-backed pages needing seeded rows) is a breadth exercise
+   still to be widened.
+2. **A full-suite live mutation score** — needs a faster endpoint set (many ecosudar
+   endpoints hang to timeout), so the fast score used a scoped oracle.
+3. The requirement/edge oracles are wired into the **scenario** runner; threading them into
+   the flat `test` per-assertion path (which doesn't do read-back per write) is still open.
 
 ## Verification
 

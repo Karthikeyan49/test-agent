@@ -51,7 +51,18 @@ class PlaywrightRunner:
             )
         from playwright.sync_api import sync_playwright
         self.playwright_ctx = sync_playwright().start()
-        self.browser = self.playwright_ctx.chromium.launch(headless=self.headless)
+        # Portability: when the pinned Playwright browser build isn't present (e.g. a
+        # pre-provisioned CI image ships a different build under PLAYWRIGHT_BROWSERS_PATH),
+        # honour an explicit chromium binary via PLAYWRIGHT_CHROMIUM_PATH, else fall back
+        # to a conventional /opt/pw-browsers/chromium symlink if it exists. This lets the
+        # browser layer run on images where `playwright install` can't/needn't be re-run.
+        _launch_kwargs = {"headless": self.headless}
+        _exe = os.environ.get("PLAYWRIGHT_CHROMIUM_PATH")
+        if not _exe and os.path.exists("/opt/pw-browsers/chromium"):
+            _exe = "/opt/pw-browsers/chromium"
+        if _exe and os.path.exists(_exe):
+            _launch_kwargs["executable_path"] = _exe
+        self.browser = self.playwright_ctx.chromium.launch(**_launch_kwargs)
         self.context = self.browser.new_context()
         # Inject a pre-authenticated session into localStorage BEFORE any app JS
         # runs (add_init_script runs before page scripts on EVERY navigation), so
