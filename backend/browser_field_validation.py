@@ -29,8 +29,23 @@ _NUMERICISH = re.compile(r'(?:^|[_\W])(qty|quantity|amount|price|total|cost|coun
                          r'pincode|pin_code|zip|phone|mobile|rate|percent|year)(?:[_\W]|$)', re.I)
 
 
-def field_value_cases(field: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The per-field frontend value battery. Each case: {case, value, expect}."""
+def field_value_cases(field: Dict[str, Any], rich: bool = True,
+                      rich_max_per_method: int = 8) -> List[Dict[str, Any]]:
+    """The per-field frontend value battery. Each case: {case, value, expect}.
+
+    rich=True (default) delegates to backend/field_battery.rich_field_cases, so the
+    BROWSER drives MANY cases per method per field (dozens of malformed formats,
+    boundary values, length configs, XSS/SQLi/misc fuzz) — the same rich battery the
+    API layer uses. rich=False keeps the original lean one-per-method set."""
+    if rich:
+        try:
+            from field_battery import rich_field_cases
+        except ImportError:
+            from backend.field_battery import rich_field_cases  # type: ignore
+        return [{"case": c["case"], "value": c["value"], "expect": c["expect"],
+                 "method": c["method"]}
+                for c in rich_field_cases(field, max_per_method=rich_max_per_method)]
+
     name = str(field.get("name") or field.get("fieldName") or "")
     ftype = str(field.get("fieldType") or field.get("type") or "text").lower()
     required = bool(field.get("required", False))
@@ -169,14 +184,22 @@ def run_browser_field_validation(page, route: str, base_url: str,
 
 
 if __name__ == "__main__":
-    # ── value-battery generation (no browser) ──────────────────────────────
-    ec = field_value_cases({"name": "email", "required": True})
+    # ── lean value-battery (one per method) ────────────────────────────────
+    ec = field_value_cases({"name": "email", "required": True}, rich=False)
     assert any(c["case"] == "bad_email" and c["expect"] == "reject" for c in ec)
     assert any(c["case"] == "required_empty" for c in ec)
-    nc = field_value_cases({"name": "quantity", "type": "number", "required": False})
+    nc = field_value_cases({"name": "quantity", "type": "number", "required": False}, rich=False)
     assert any(c["case"] == "non_numeric" and c["expect"] == "reject" for c in nc)
     assert any(c["case"] == "negative" for c in nc)
-    print(f"[gen] email cases={len(ec)} number cases={len(nc)}")
+    print(f"[gen-lean] email cases={len(ec)} number cases={len(nc)}")
+
+    # ── RICH value-battery (default): many cases per method, driven in-browser ──
+    er = field_value_cases({"name": "email", "type": "email", "required": True, "maxLength": 100})
+    methods = {c.get("method") for c in er}
+    assert len(er) > len(ec) * 3, (len(er), len(ec))
+    assert {"format", "fuzz_xss", "fuzz_sqli"} <= methods, methods
+    assert all("value" in c and "expect" in c for c in er)
+    print(f"[gen-rich] email cases={len(er)} across methods {sorted(m for m in methods if m)}")
 
     # ── live detector self-test against a REAL native form (no server needed) ──
     try:
