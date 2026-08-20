@@ -210,10 +210,13 @@ agent "<task>":
 | `graph_rag` | GraphRAG retrieval (semantic if sentence-transformers installed, else lexical) |
 | `page_docs` / `repo_memory` | Phase 0 page dossiers → RAG memory/index |
 | `endpoint_contracts` | Phase 1.5 request-contract enrichment |
-| `field_blackbox` | per-field black-box battery + contract negatives + fuzz-robustness |
+| `field_blackbox` | per-field black-box battery + contract negatives + fuzz-robustness + **honest field-coverage report** (union of DB/contract/page-docs fields, covered vs uncovered) |
+| `combinatorial` | **pairwise (t-wise) covering-array generation** — multiple fields wrong together, bounded per endpoint (beyond single-fault) |
+| `field_edge_oracle` | **per-field in/out edge round-trip oracle** — submitted → stored → read-back; flags truncation/drop/encoding/change; missing leg = SKIP |
 | `metamorphic` | metamorphic relation generator **+ executor** |
 | `injection_oracle` | differential SQLi + reflected-XSS oracle |
 | `authz_oracle` | IDOR / privilege role-differential oracle |
+| `requirement_oracle` | **requirement (intent) oracle** — machine-checkable subset of page-docs use-cases / OpenAPI → PASS/FAIL/SKIP; vague NL = SKIP, never a fake PASS |
 | `invariants` | data-correctness invariants (schema + guards) |
 | `spec_oracle` | OpenAPI/Swagger → contract tests |
 | `explorer` | AI edge-case proposals (grounding-filtered) |
@@ -225,10 +228,16 @@ agent "<task>":
 | `browser_field_validation` | per-field validation checks in the browser |
 | `ui_audits` | WCAG accessibility audit |
 | `auth` | token / login / cookie session manager |
-| `mutation` | inject bugs, score the suite (crash-safe) |
+| `mutation` | inject bugs, score the suite (crash-safe, byte-exact CRLF-safe restore); **repo-wide discovery + stratified/seeded/bounded sampling** with discovered-vs-executed honesty |
 | `scenario_contracts` / `scenarios` / `scenario_runner` / `scenario_reports` | RAG scenarios + 3-way UI+API+DB run + reports |
 | `failure_analyzer` | deterministic root cause (+ optional AI hypothesis) |
-| `ai_provider` | optional LLM gateway (local default; external needs consent) |
+| `ai_provider` | optional LLM gateway (local default; external needs consent); **RAG-grounded scenario proposals with an honest offline-rag fallback** (`ai=False` when no model ran) |
 | `agent` | grounded ReAct agent over the graph (read-only) |
 | `reporters` | JUnit XML + CI exit codes |
+
+> **Depth upgrade:** the coverage-depth capabilities (per-field completeness + in/out
+> edge oracle, requirement oracle, page-docs RAG→AI + offline-rag, repo-wide mutation,
+> pairwise combinatorial) and the Q2 / S4 bug fixes are documented in
+> [`COVERAGE_UPGRADE.md`](COVERAGE_UPGRADE.md). New `test` flags: `--combinatorial[-strength|-max]`,
+> `--mutate-repo`, `--mutate-discover`, `--mutate-budget/-per-file-cap/-time-budget`.
 | `main` | optional FastAPI wrapper (scan/graph) |

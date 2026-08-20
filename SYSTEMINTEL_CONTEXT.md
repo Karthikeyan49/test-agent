@@ -246,6 +246,46 @@ The terminal will stream the agent's internal thoughts, the tools it decides to 
 
 ---
 
+## 7A. Test-Depth Capabilities (implemented — see `COVERAGE_UPGRADE.md`)
+
+The following coverage-depth capabilities are implemented, each backed by a
+deterministic self-test in the pytest harness (`tests/test_selftests.py`, 29/29 green):
+
+* **Per-field completeness + in/out edge oracle** (`field_edge_oracle.py`): for a field
+  the graph knows, the value SUBMITTED (SUBMITS_TO) is compared against the value STORED
+  (WRITES_TO column) and READ BACK (read endpoint / cross-page). A provable corruption
+  (truncation / silent-drop / encoding-change) is a FAIL with before/after; a leg with no
+  evidence is a SKIP — never a PASS.
+* **Honest field-coverage accounting** (`field_blackbox.field_coverage_report`): the true
+  denominator across the union of DB columns + request-contract fields + page-docs UI
+  fields, reporting which fields were exercised and which were not (with the reason).
+* **Combinatorial (pairwise) generation** (`combinatorial.py`): a deterministic t-wise
+  covering array so multiple fields can be wrong together, bounded per endpoint — beyond
+  single-fault isolation.
+* **Requirement (intent) oracle** (`requirement_oracle.py`): judges the machine-checkable
+  subset of requirements (page-docs use-cases / OpenAPI) as PASS/FAIL/SKIP. A vague NL
+  requirement that cannot be grounded is SKIP ("not machine-checkable"), never a fake PASS.
+* **Page-docs RAG → AI, with an honest offline path** (`graph_rag`, `ai_provider`): the
+  page-docs corpus is ingested as first-class retrievable documents; scenario proposals go
+  to a live model when reachable + S5-consented, else fall back to a deterministic
+  `offline-rag` result explicitly tagged `ai=False` so it is never mistaken for the model's
+  output.
+* **Mutation at repo scale** (`mutation.py`): repo-wide mutant discovery + a stratified,
+  seeded, bounded executor that always reports discovered-vs-executed (a sampled score is
+  never read as full coverage). Restores source byte-for-byte, CRLF-safe.
+
+**Bug fixes shipped with the above:** the Q2 auth-token gap (a credential supplied via an
+`Authorization` / `Cookie` header — how `--auth-token` / `--auth-cookie` arrive — now
+credits the auth-skip decision, so a real 401/403 is a genuine result, not a wrongly
+SKIPPED test), and the S4 CRLF mutation-restore fix.
+
+**Honestly not yet done:** in-browser UI black-box on all pages (needs the React SPA
+served — live runs used `--no-browser`), a completed live mutation kill count (discovery
+ran; execution was stopped early against timing-out endpoints), and auto-invoking the
+requirement + RAG-offline oracles in every per-assertion pass of the default runner.
+
+---
+
 ## 8. Conclusion
 
 SystemIntel represents a paradigm shift in software testing and quality assurance. By replacing brittle, manually maintained UI tests with an autonomously generated, multi-layered, graph-backed testing engine, development teams can achieve unprecedented coverage and confidence. 
