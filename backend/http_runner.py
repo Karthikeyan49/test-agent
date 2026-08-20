@@ -82,6 +82,14 @@ class HTTPRunner:
         auth_token      = assertion.get('authToken') or assertion.get('bearerToken')
         if auth_token:
             headers['Authorization'] = f'Bearer {auth_token}'
+        # Q2 credential detection must recognise a credential supplied ANY way:
+        # the assertion's authToken/bearerToken key OR an Authorization/Cookie
+        # header already merged in by the caller (this is how a global
+        # --auth-token / --auth-cookie arrives — see cli.py auth_headers()).
+        # Without this, a token sent via header would not credit the auth-skip
+        # decision and a real 401/403 outcome would be wrongly SKIPPED.
+        _hdr_keys       = {k.lower() for k in headers}
+        has_credential  = bool(auth_token) or 'authorization' in _hdr_keys or 'cookie' in _hdr_keys
         expected_status = assertion.get('expectedStatusCode', assertion.get('expectedStatus', 200))
         expected_in     = assertion.get('expectedStatusIn')     # e.g. [400, 422] — any of these
         expected_class  = assertion.get('expectedStatusClass')  # "2xx"|"4xx"|"5xx"|"!5xx"|"!2xx"
@@ -138,7 +146,7 @@ class HTTPRunner:
             expected_auth  = (expected_status in (401, 403)) or (
                 bool(expected_in) and any(c in (401, 403) for c in expected_in))
             if (actual_status in (401, 403) and auth_sensitive
-                    and not expected_auth and not auth_token):
+                    and not expected_auth and not has_credential):
                 result.update({
                     "actualStatus": actual_status,
                     "responseBody": resp_body,
@@ -295,6 +303,22 @@ if __name__ == "__main__":
         {"type": "API", "endpoint": "POST /vendors",
          "expectedStatusClass": "4xx"})
     assert r.get("passed") is True and not r.get("skipped"), r
+
+    # Q2e: a global --auth-token arrives as an Authorization *header* (not the
+    #      authToken key). A 401 must then be a genuine result, NOT a skip —
+    #      otherwise --auth-token silently fails to unlock protected endpoints.
+    r = HTTPRunner(transport=_mock(401)).run_assertion(
+        {"type": "API", "endpoint": "GET /orders",
+         "expectedStatusClass": "2xx",
+         "headers": {"Content-Type": "application/json", "Authorization": "Bearer tok"}})
+    assert not r.get("skipped"), "a 401 with an Authorization header is a genuine outcome, not a skip"
+
+    # Q2f: same for cookie-mode auth (Cookie header credits the credential).
+    r = HTTPRunner(transport=_mock(403)).run_assertion(
+        {"type": "API", "endpoint": "GET /admin",
+         "expectedStatusClass": "2xx",
+         "headers": {"Cookie": "session=abc"}})
+    assert not r.get("skipped"), "a 403 with a Cookie header is a genuine authz outcome, not a skip"
 
     # S7: an off-origin absolute URL is refused (SSRF / token-leak guard).
     r = HTTPRunner(base_url="http://localhost:8080", transport=_mock(200)).run_assertion(
