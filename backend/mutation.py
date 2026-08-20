@@ -32,8 +32,14 @@ _SWAPS = [
     (" && ", " || "),   (" || ", " && "),      # C-family boolean
     (" and ", " or "),  (" or ", " and "),      # Python boolean
     (" + ", " - "),     (" - ", " + "),
+    (" * ", " / "),     (" / ", " * "),        # multiplicative
+    (" % ", " * "),
+    (" += ", " -= "),   (" -= ", " += "),      # compound assignment
+    (" *= ", " /= "),   (" /= ", " *= "),
+    ("++", "--"),       ("--", "++"),          # inc/dec
     ("True", "False"),  ("False", "True"),      # Python literals
     ("true", "false"),  ("false", "true"),      # PHP / JS / Java literals
+    ("null", "0"),      ("None", "0"),          # null-ish
 ]
 
 # A line is treated as a comment (skipped) when its stripped form starts with any
@@ -73,12 +79,18 @@ def _iter_mutations(source: str) -> Iterator[Tuple[int, str, str, str]]:
                        line, mutated_line)
                 start = pos + len(old)
 
-        # first standalone integer literal on the line -> +1
-        m = re.search(r'(?<![\w.])(\d+)(?![\w.])', line)
-        if m:
-            newval = str(int(m.group(1)) + 1)
-            mutated_line = line[:m.start()] + newval + line[m.end():]
-            yield (idx + 1, f"int {m.group(1)}->{newval}", line, mutated_line)
+        # EVERY standalone integer literal on the line, each mutated three ways
+        # (+1, -1, and a role-flip 0<->1) — off-by-one + zero/boundary faults.
+        for m in re.finditer(r'(?<![\w.])(\d+)(?![\w.])', line):
+            orig = m.group(1)
+            iv = int(orig)
+            variants = {str(iv + 1), str(iv - 1)}
+            variants.add("1" if iv == 0 else "0")   # 0<->1 role flip
+            for newval in sorted(variants):
+                if newval == orig:
+                    continue
+                mutated_line = line[:m.start()] + newval + line[m.end():]
+                yield (idx + 1, f"int {orig}->{newval}", line, mutated_line)
 
 
 def generate_mutants(source: str, max_mutants: int = 20) -> List[Dict[str, Any]]:

@@ -793,6 +793,26 @@ def _apply_config_and_preset(args):
     if preset:
         print(f"{GREEN}[✓] Applied '{preset}' preset{RESET}")
 
+    # (3) EXHAUSTIVE mode — remove every generation cap / sample so the run computes
+    #     ALL possible cases, combinations and mutants (no "one representative", no
+    #     stratified sampling). Slow by design; the point is completeness, not speed.
+    if getattr(args, "exhaustive", False):
+        args.field_blackbox = True
+        args.combinatorial = True
+        args.field_blackbox_max = max(getattr(args, "field_blackbox_max", 0) or 0, 1_000_000)
+        args.field_blackbox_rich_max = max(getattr(args, "field_blackbox_rich_max", 0) or 0, 999)
+        args.combinatorial_max = max(getattr(args, "combinatorial_max", 0) or 0, 1_000_000)
+        args.combinatorial_strength = max(getattr(args, "combinatorial_strength", 2) or 2, 2)
+        args.scenarios_ai_max = max(getattr(args, "scenarios_ai_max", 0) or 0, 100)
+        # mutation: run EVERY discovered mutant (no budget/per-file/time sampling)
+        args.mutate_budget = 0            # 0 → execute the whole catalog
+        args.mutate_per_file_cap = 0
+        args.mutate_time_budget = 0
+        args.mutate_max = max(getattr(args, "mutate_max", 0) or 0, 100000)  # file-mode: all per file
+        args.mutate_scope = getattr(args, "mutate_scope", "auto") or "auto"
+        print(f"{BOLD}[✓] EXHAUSTIVE mode: all caps removed — every field case, "
+              f"combination and mutant will be generated/run (this is slow).{RESET}")
+
 
 def _flat_edge_requirement_findings(tc, tc_result, http_runner, auth_headers,
                                     db_runner=None, block_writes=False):
@@ -1076,10 +1096,13 @@ def cmd_test(args):
                 "apiEndpoints":     analysis.get("apiEndpoints", []),
                 "dbTables":         analysis.get("dbResult", {}).get("tables", []),
             }
+            _exh = getattr(args, 'exhaustive', False)
             comb = generate_combinatorial_tests(
                 comb_graph,
                 strength=getattr(args, 'combinatorial_strength', 2),
-                max_cases=getattr(args, 'combinatorial_max', 2000))
+                cap_per_endpoint=(100000 if _exh else 64),
+                max_cases=getattr(args, 'combinatorial_max', 2000),
+                max_classes_per_field=(12 if _exh else 4))
             if comb:
                 print(f"{GREEN}[✓] + {len(comb)} combinatorial (pairwise) test(s) — "
                       f"multi-field interaction coverage{RESET}")
@@ -1786,6 +1809,7 @@ Examples:
     tp.add_argument("--field-blackbox-max", type=int, default=4000, help="Cap on per-field black-box cases (default: 4000)")
     tp.add_argument("--field-blackbox-rich-max", type=int, default=12, help="RICH battery: max cases per method per field (default: 12 — e.g. 12 malformed emails, 12 boundary values, 12 XSS/SQLi vectors each).")
     tp.add_argument("--field-blackbox-lean", action="store_true", help="Use the lean one-case-per-method battery instead of the rich multi-case-per-method battery (default is rich).")
+    tp.add_argument("--exhaustive", action="store_true", help="EXHAUSTIVE mode: remove EVERY generation cap and sample — turn on field-blackbox + combinatorial, uncap per-method/per-endpoint/global limits, and (with --mutate/--mutate-repo) run ALL discovered mutants (no stratified sampling, no budget/time cap). Computes all possible cases/combinations/mutants. Very slow — completeness over speed.")
     tp.add_argument("--edge-oracle", dest="edge_oracle", action="store_true", default=True, help="After each successful CREATE (POST), issue a read-back GET (and a DB row read when --db is set) and run the in/out edge + requirement oracles over submitted -> stored -> read_back. Additive: never changes a case's PASS/FAIL. On by default.")
     tp.add_argument("--no-edge-oracle", dest="edge_oracle", action="store_false", help="Disable the per-write read-back edge/requirement oracle pass.")
     tp.add_argument("--combinatorial", action="store_true", help="DEPTH: generate pairwise (t-wise) combinatorial tests — multiple fields wrong TOGETHER, not just single-fault isolation. A seeded covering array keeps the count bounded (pairwise, not full cross-product).")
