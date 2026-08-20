@@ -169,7 +169,12 @@ or `--combinatorial`) runs.
   checks, so the per-mutant suite drops from ~354 endpoints to ~21 (via the graph's
   controllerName→endpoint map, or a resource-name heuristic). This makes a **fast live
   mutation score** practical — the previous full-suite baseline (595 checks, many hanging
-  to timeout) was the sole blocker.
+  to timeout) was the sole blocker. **Proven live:** a run over 5 controllers (Product,
+  Order, Query, Quote, Statistics) executed **29 mutants → 5 killed / 24 survived = 17%**
+  at **106 of 595 checks per run** in ~7 min, with the tree restored byte-for-byte. The
+  17% is honest: most survivors are logic mutations (int defaults, boolean flags, status
+  codes) that endpoint-status checks can't catch — killing those needs response-body
+  assertions, a known sensitivity limit rather than a mutation-engine gap.
 
 ## Honest remaining gaps
 
