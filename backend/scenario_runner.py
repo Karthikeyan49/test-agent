@@ -108,10 +108,12 @@ class ScenarioRunner:
     def run(self, scenario: Dict[str, Any]) -> Dict[str, Any]:
         self.store = {}
         step_results: List[Dict[str, Any]] = []
+        exec_steps: List[Dict[str, Any]] = []   # substituted steps as actually sent
 
         steps = sorted(scenario.get("steps", []) or [], key=lambda s: s.get("n", 0))
         for raw_step in steps:
             step = self._substitute_step(raw_step)
+            exec_steps.append(step)
             layer = step.get("layer")
 
             t0 = time.perf_counter()
@@ -140,7 +142,84 @@ class ScenarioRunner:
                 duration_ms=duration_ms,
             ))
 
-        return make_scenario_result(scenario, step_results)
+        result = make_scenario_result(scenario, step_results)
+        # ADDITIVE: run the in/out edge oracle and the requirement (intent) oracle
+        # over evidence this scenario already collected (submitted body → DB row →
+        # read-back response). Attached under "oracleFindings" — it NEVER changes the
+        # scenario's own PASS/FAIL (which make_scenario_result already decided); it
+        # only surfaces round-trip corruption and requirement violations for triage.
+        try:
+            findings = self._derive_oracle_findings(scenario, exec_steps, step_results)
+            if findings:
+                result["oracleFindings"] = findings
+        except Exception as e:   # an oracle must never break a scenario run
+            result["oracleFindings"] = {"error": f"{type(e).__name__}: {e}"}
+        return result
+
+    # ── oracle findings (additive) ───────────────────────────────────────
+    def _derive_oracle_findings(self, scenario: Dict[str, Any],
+                                exec_steps: List[Dict[str, Any]],
+                                step_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        findings: Dict[str, Any] = {}
+
+        # submitted: the first write (POST/PUT/PATCH) api step's body actually sent.
+        submitted: Dict[str, Any] = {}
+        for st in exec_steps:
+            if st.get("layer") == "api" and (st.get("method") or "").upper() in ("POST", "PUT", "PATCH"):
+                b = st.get("body") or st.get("testData") or {}
+                if isinstance(b, dict) and b:
+                    submitted = b
+                    break
+        # stored: the first DB step's first returned row (column -> value).
+        stored: Dict[str, Any] = {}
+        for sr in step_results:
+            rows = sr.get("dbRows")
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                stored = rows[0]
+                break
+        # read-back: the last api response that returned a JSON object (unwrap data/result).
+        readback: Dict[str, Any] = {}
+        for sr in reversed(step_results):
+            resp = sr.get("apiResponse")
+            if isinstance(resp, dict):
+                for wrap in ("data", "result", "item", "record"):
+                    if isinstance(resp.get(wrap), dict):
+                        readback = resp[wrap]
+                        break
+                else:
+                    readback = resp
+                break
+
+        # ── in/out edge oracle: only for fields with SOME outgoing evidence ──
+        if submitted and (stored or readback):
+            try:
+                from field_edge_oracle import check_field_edge
+            except ImportError:
+                from backend.field_edge_oracle import check_field_edge  # type: ignore
+            edge: List[Dict[str, Any]] = []
+            for fld, val in submitted.items():
+                if fld not in stored and fld not in readback:
+                    continue   # no outgoing leg for this field — nothing to compare
+                kwargs: Dict[str, Any] = {"submitted": val}
+                if fld in stored:
+                    kwargs["stored"] = stored[fld]
+                if fld in readback:
+                    kwargs["read_back"] = readback[fld]
+                edge.append(check_field_edge(fld, **kwargs))
+            if edge:
+                findings["fieldEdge"] = edge
+
+        # ── requirement (intent) oracle: only if the scenario carries a source ──
+        req_source = (scenario.get("requirements") or scenario.get("use_cases")
+                      or scenario.get("useCases"))
+        if req_source and readback:
+            try:
+                from requirement_oracle import evaluate_requirements
+            except ImportError:
+                from backend.requirement_oracle import evaluate_requirements  # type: ignore
+            findings["requirement"] = evaluate_requirements(req_source, readback)
+
+        return findings
 
     # ── substitution ────────────────────────────────────────────────────
     def _substitute_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
@@ -423,5 +502,35 @@ if __name__ == "__main__":
     for res in (result_db, result_api, result_ui):
         assert set(("scenarioId", "name", "category", "priority", "status",
                     "layers", "steps", "failureReasons", "durationMs")) <= set(res.keys())
+
+    # ── 5) ADDITIVE oracle findings: in/out edge + requirement (intent) ─────
+    #     Feed evidence the runner would have collected (submitted body → DB row →
+    #     read-back response). A silent truncation and a violated requirement must be
+    #     surfaced WITHOUT changing the scenario's own verdict.
+    runner_or = ScenarioRunner(base_url="http://localhost:9999")
+    scen_or = {"id": "SC-OR-1", "requirements": ["status must be active", "total at least 100"]}
+    exec_steps = [
+        {"layer": "api", "method": "POST", "endpoint": "POST /products",
+         "body": {"name": "Widget", "price": "50", "status": "active"}},
+        {"layer": "db", "action": "query_exists"},
+        {"layer": "api", "method": "GET", "endpoint": "GET /products/1"},
+    ]
+    step_results_or = [
+        {"layer": "api", "apiResponse": {"data": {"id": 1}}, "dbRows": None},
+        {"layer": "db", "dbRows": [{"name": "Widget", "price": 50, "status": "active"}]},
+        {"layer": "api", "apiResponse": {"data": {"name": "Wid", "price": 50,
+                                                  "status": "active", "total": 40}}},
+    ]
+    findings = runner_or._derive_oracle_findings(scen_or, exec_steps, step_results_or)
+    edge = {f["field"]: f for f in findings.get("fieldEdge", [])}
+    assert edge["name"]["verdict"] == "FAIL" and edge["name"]["mismatch"]["kind"] == "truncation", edge["name"]
+    assert edge["price"]["verdict"] == "PASS" and edge["status"]["verdict"] == "PASS", edge
+    assert findings["requirement"]["verdict"] == "FAIL", findings["requirement"]
+    assert findings["requirement"]["failed"] == 1 and findings["requirement"]["passed"] == 1, findings["requirement"]
+    print(f"[oracle findings] fieldEdge: name={edge['name']['verdict']} "
+          f"price={edge['price']['verdict']} status={edge['status']['verdict']}; "
+          f"requirement verdict={findings['requirement']['verdict']}")
+
+    print("scenario_runner SELF-TEST PASS (db + api + ui + oracle findings)")
 
     print("SELF-TEST PASS")

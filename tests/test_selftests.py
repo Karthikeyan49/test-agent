@@ -40,6 +40,7 @@ OFFLINE_SELFTEST_MODULES = [
     "spec_oracle",
     "endpoint_contracts",
     "scenario_contracts",
+    "scenario_runner",      # 3-way runner + additive edge/requirement oracle findings
     "scenario_reports",
     "reporters",
     "repo_memory",
