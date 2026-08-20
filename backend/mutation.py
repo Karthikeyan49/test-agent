@@ -278,7 +278,10 @@ class MutationTester:
     # ---- disk helpers -----------------------------------------------------
     @staticmethod
     def _write(path: str, text: str) -> None:
-        with open(path, 'w', encoding='utf-8') as f:
+        # newline='' disables universal-newline translation on write, so a source
+        # whose original line endings are CRLF is restored/written byte-for-byte
+        # instead of being silently rewritten to LF (which would dirty the tree).
+        with open(path, 'w', encoding='utf-8', newline='') as f:
             f.write(text)
 
     @staticmethod
@@ -298,9 +301,9 @@ class MutationTester:
                 if os.path.getsize(bak) == 0:
                     os.remove(bak)
                     continue
-                with open(bak, "r", encoding="utf-8") as f:
+                with open(bak, "r", encoding="utf-8", newline='') as f:
                     good = f.read()
-                with open(path, "w", encoding="utf-8") as f:
+                with open(path, "w", encoding="utf-8", newline='') as f:
                     f.write(good)
                 os.remove(bak)
                 recovered.append(path)
@@ -314,21 +317,23 @@ class MutationTester:
         exiting, runs `body(original)` (which does the per-mutant loop), then ALWAYS
         restores the source from the in-memory original and drops the backup."""
         import os, signal
-        with open(path, 'r', encoding='utf-8') as f:
+        # newline='' preserves the source's real line endings (CRLF stays CRLF), so
+        # the backup and every restore are byte-for-byte identical to the original.
+        with open(path, 'r', encoding='utf-8', newline='') as f:
             original = f.read()
 
         bak = path + ".si-orig"
         # Write the backup ATOMICALLY (tmp + os.replace) so a crash mid-write
         # can't leave a partial .si-orig that a later recovery would trust.
         _tmp = bak + ".tmp"
-        with open(_tmp, 'w', encoding='utf-8') as f:
+        with open(_tmp, 'w', encoding='utf-8', newline='') as f:
             f.write(original)
             f.flush()
             os.fsync(f.fileno())
         os.replace(_tmp, bak)
 
         def _restore_and_exit(signum, frame, _p=path, _o=original, _b=bak):
-            with open(_p, 'w', encoding='utf-8') as f:
+            with open(_p, 'w', encoding='utf-8', newline='') as f:
                 f.write(_o)
             if os.path.exists(_b):
                 os.remove(_b)
@@ -634,5 +639,24 @@ if __name__ == "__main__":
     assert small["discovered"] == len(catalog), "discovered surfaced even when sampling"
     assert small["executed"] <= 2 and small["executed"] < small["discovered"], "sampled < full"
     assert open(fa).read() == SRC_A and open(fb).read() == SRC_B, "tree byte-identical after sample"
+
+    # ------------------------------------------------------------------ #
+    # 5) CRLF preservation: a source with Windows line endings must be    #
+    #    restored BYTE-for-byte (not silently rewritten to LF, which would #
+    #    dirty a whole file in git). Regression test for the S4 restore.   #
+    # ------------------------------------------------------------------ #
+    fc = os.path.join(repo, "crlf.php")
+    SRC_C_BYTES = b"def add(a, b):\r\n    return a + b\r\n"   # CRLF on the wire
+    with open(fc, "wb") as f:
+        f.write(SRC_C_BYTES)
+    cat_c = discover_mutants(fc, include=("*.php",))
+    assert cat_c, "should discover a mutant in the CRLF file"
+    _ = MutationTester().execute_catalog(cat_c, run_tests_repo, budget=10 ** 9)
+    with open(fc, "rb") as f:
+        after = f.read()
+    assert after == SRC_C_BYTES, ("CRLF source must be restored byte-for-byte "
+                                  f"(got {after!r})")
+    assert not os.path.exists(fc + ".si-orig"), "no orphan backup for the CRLF file"
+    print("CRLF preservation: Windows-line-ending source restored byte-for-byte")
 
     print("SELF-TEST PASS")
