@@ -718,6 +718,97 @@ def _apply_config_and_preset(args):
         print(f"{GREEN}[✓] Applied '{preset}' preset{RESET}")
 
 
+def _flat_edge_requirement_findings(tc, tc_result, http_runner, auth_headers,
+                                    db_runner=None, block_writes=False):
+    """Auto-invoke the in/out edge + requirement oracles on the flat `test` path.
+
+    For a test case that performed a CREATE (POST) which returned 2xx, this issues a
+    real READ-BACK GET for the created resource (and, when a DB runner is configured,
+    fetches the stored row), then compares submitted -> stored -> read_back with
+    field_edge_oracle and checks any machine-checkable requirements the case carries
+    with requirement_oracle. Strictly ADDITIVE: attaches tc_result["oracleFindings"]
+    and NEVER changes the case's own PASS/FAIL. Returns the findings dict (or None)."""
+    try:
+        from field_edge_oracle import check_field_edge
+        from requirement_oracle import evaluate_requirements
+    except ImportError:
+        from backend.field_edge_oracle import check_field_edge          # type: ignore
+        from backend.requirement_oracle import evaluate_requirements     # type: ignore
+
+    # Find a successful write assertion (POST create) with a submitted body.
+    submitted = dict(tc.get("testData", {}) or {})
+    if not submitted:
+        return None
+    write_hr = None
+    for hr in tc_result.get("httpResults", []):
+        if hr.get("skipped") or not hr.get("passed"):
+            continue
+        if (hr.get("method") or "").upper() == "POST":
+            write_hr = hr
+            break
+    if write_hr is None:
+        return None
+
+    # Resolve the created resource id and build a read-back GET.
+    resp = write_hr.get("responseBody")
+    created = resp.get("data") if isinstance(resp, dict) and isinstance(resp.get("data"), dict) else resp
+    rid = None
+    if isinstance(created, dict):
+        for k in ("id", "ID", "uuid", "code"):
+            if created.get(k) not in (None, ""):
+                rid = created[k]; break
+    endpoint = write_hr.get("endpoint", "")            # e.g. "POST /products"
+    path = endpoint.split(" ", 1)[1] if " " in endpoint else endpoint
+    read_back = {}
+    if rid is not None and not block_writes:
+        get_ep = f"GET {path.rstrip('/')}/{rid}"
+        rb = http_runner.run_assertion({"type": "API", "endpoint": get_ep,
+                                        "headers": auth_headers, "expectedStatusClass": "!5xx"})
+        rb_body = rb.get("responseBody")
+        if isinstance(rb_body, dict):
+            read_back = rb_body.get("data") if isinstance(rb_body.get("data"), dict) else rb_body
+        tc_result.setdefault("httpResults", []).append(rb)   # record the read-back call
+
+    # Stored row via the DB runner, if a cross_layer table is known.
+    stored = {}
+    if db_runner is not None and rid is not None:
+        tbl = None
+        for a in tc.get("assertions", []):
+            if a.get("type") == "DB" and a.get("table"):
+                tbl = a.get("table"); break
+        if tbl:
+            try:
+                row = db_runner.fetch_row(tbl, {"id": rid}) if hasattr(db_runner, "fetch_row") else None
+                if isinstance(row, dict):
+                    stored = row
+            except Exception:
+                stored = {}
+
+    findings = {}
+    if stored or read_back:
+        edge = []
+        for fld, val in submitted.items():
+            if fld not in stored and fld not in read_back:
+                continue
+            kwargs = {"submitted": val}
+            if fld in stored:
+                kwargs["stored"] = stored[fld]
+            if fld in read_back:
+                kwargs["read_back"] = read_back[fld]
+            edge.append(check_field_edge(fld, **kwargs))
+        if edge:
+            findings["fieldEdge"] = edge
+
+    req_source = tc.get("requirements") or tc.get("use_cases") or tc.get("useCases")
+    if req_source and read_back:
+        findings["requirement"] = evaluate_requirements(req_source, read_back)
+
+    if findings:
+        tc_result["oracleFindings"] = findings
+        return findings
+    return None
+
+
 def cmd_test(args):
     print_banner()
     section("Evidence-Based Test Generation")
@@ -1236,6 +1327,25 @@ def cmd_test(args):
                         f"actual={dr.get('actualValue', dr.get('actualRowsCount', '?'))}"
                     )
 
+        # 4. In/out edge + requirement oracles (read-back per write) — ADDITIVE.
+        if getattr(args, "edge_oracle", True):
+            try:
+                of = _flat_edge_requirement_findings(
+                    tc, tc_result, http_runner,
+                    {"Content-Type": "application/json", **auth.auth_headers()},
+                    db_runner=db_runner, block_writes=block_writes)
+                if of:
+                    fe = of.get("fieldEdge", [])
+                    corrupt = [f for f in fe if f.get("passed") is False]
+                    if corrupt:
+                        for f in corrupt:
+                            print(f"  {YELLOW}  ⧉ edge oracle: {f['field']} — {f['reason']}{RESET}")
+                    rq = of.get("requirement")
+                    if rq and rq.get("verdict") == "FAIL":
+                        print(f"  {YELLOW}  ⧉ requirement oracle: {rq['failed']} requirement(s) violated{RESET}")
+            except Exception as e:
+                tc_result["oracleFindings"] = {"error": f"{type(e).__name__}: {e}"}
+
         tc_result["durationMs"] = round((time.time() - start_tc) * 1000, 2)
 
         # A test that verified NOTHING live (every assertion skipped) is SKIPPED,
@@ -1594,6 +1704,8 @@ Examples:
     tp.add_argument("--ui-base-url",   help="Frontend base URL for UI steps (default: same as --base-url); use when the SPA and API are on different hosts")
     tp.add_argument("--field-blackbox", action="store_true", help="DEPTH: generate the full per-field black-box battery (required/type/format/length/enum/boundary/fuzz-robustness) for every writable field. NOTE: the fuzz-robustness case only asserts the server does not 5xx on a hostile-looking string — it is NOT a vulnerability/injection check.")
     tp.add_argument("--field-blackbox-max", type=int, default=4000, help="Cap on per-field black-box cases (default: 4000)")
+    tp.add_argument("--edge-oracle", dest="edge_oracle", action="store_true", default=True, help="After each successful CREATE (POST), issue a read-back GET (and a DB row read when --db is set) and run the in/out edge + requirement oracles over submitted -> stored -> read_back. Additive: never changes a case's PASS/FAIL. On by default.")
+    tp.add_argument("--no-edge-oracle", dest="edge_oracle", action="store_false", help="Disable the per-write read-back edge/requirement oracle pass.")
     tp.add_argument("--combinatorial", action="store_true", help="DEPTH: generate pairwise (t-wise) combinatorial tests — multiple fields wrong TOGETHER, not just single-fault isolation. A seeded covering array keeps the count bounded (pairwise, not full cross-product).")
     tp.add_argument("--combinatorial-strength", type=int, default=2, choices=[1, 2], help="Combinatorial strength: 1 = each value-class once; 2 = pairwise (default).")
     tp.add_argument("--combinatorial-max", type=int, default=2000, help="Global cap on combinatorial cases (default: 2000).")

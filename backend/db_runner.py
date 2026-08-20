@@ -97,6 +97,35 @@ class DBRunner:
                 pass
             self.connection = None
 
+    def fetch_row(self, table: str, where: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return a single matching row as {column: value}, or None. Identifiers are
+        whitelisted via _safe_ident (S9) and values are parameterized — used by the
+        flat-path edge oracle to read the STORED value after a write. Never raises to
+        the caller: a missing table/column or driver error yields None."""
+        if not self.connection:
+            return None
+        try:
+            st = _safe_ident(table)
+            ph = "?" if self.driver == "sqlite" else "%s"
+            conds, params = [], []
+            for col, val in (where or {}).items():
+                conds.append(f'"{_safe_ident(col)}" = {ph}')
+                params.append(val)
+            if not conds:
+                return None
+            q = f'SELECT * FROM "{st}" WHERE ' + " AND ".join(conds) + " LIMIT 1"
+            cur = self.connection.cursor()
+            cur.execute(q, tuple(params))
+            row = cur.fetchone()
+            if row is None:
+                cur.close()
+                return None
+            cols = [d[0] for d in cur.description]
+            cur.close()
+            return {cols[i]: row[i] for i in range(len(cols))}
+        except Exception:
+            return None
+
     def run_assertion(self, assertion: Dict[str, Any]) -> Dict[str, Any]:
         """
         Run a single DB assertion.
