@@ -107,16 +107,39 @@ _OBSERVE_JS = r"""
 """
 
 
+def _valid_ui_value(meta: Dict[str, Any]) -> str:
+    """A plausibly-valid value for a field, used to build the valid baseline so a
+    single-fault case is genuinely isolated (all other fields stay valid)."""
+    name = str(meta.get("name") or meta.get("fieldName") or "").lower()
+    ftype = str(meta.get("fieldType") or meta.get("type") or "text").lower()
+    if "email" in ftype or _EMAIL.search(name):
+        return "valid.user@example.com"
+    if ftype in ("number", "integer", "float", "tel") or _NUMERICISH.search(name):
+        return "5"
+    if "date" in ftype or "date" in name:
+        return "2023-06-15"
+    if meta.get("enum"):
+        return str(meta["enum"][0])
+    return "ValidValue"
+
+
 def run_browser_field_validation(page, route: str, base_url: str,
                                  field_selectors: Dict[str, str],
                                  fields_meta: Optional[List[Dict[str, Any]]] = None,
                                  submit_selector: str = 'button[type="submit"]',
-                                 max_fields: int = 0) -> Dict[str, Any]:
+                                 max_fields: int = 0, rich: bool = True) -> Dict[str, Any]:
     """
     For a form at `route`, drive every mapped field through its value battery in a
     live browser and record the frontend's reaction. `field_selectors` maps a field
     name → a real CSS selector (build it with backend/field_mapper.map_form_fields).
-    Returns a summary dict with per-case results.
+
+    SUBMIT-then-observe (trustworthy on submit-validating SPAs like react-hook-form):
+    a VALID baseline is filled into every field first, then for each case exactly ONE
+    field is set to the bad value (single-fault), the form is SUBMITTED, and the
+    frontend's reaction is read AFTER submit — native validity, aria-invalid, a visible
+    error message near the field, OR the submit being blocked (URL unchanged + no
+    success toast). The target field is restored to its valid value before the next
+    one, so faults never accumulate. Returns a summary with per-case results.
     """
     meta_by_name = {}
     for m in (fields_meta or []):
@@ -136,45 +159,74 @@ def run_browser_field_validation(page, route: str, base_url: str,
     if max_fields:
         names = names[:max_fields]
 
+    def _valid_of(nm):
+        return _valid_ui_value(meta_by_name.get(nm, {"name": nm}))
+
+    def _fill(nm, value):
+        try:
+            page.locator(field_selectors[nm]).first.fill(value, timeout=2000)
+            return True
+        except Exception:
+            return False
+
+    def _fill_baseline():
+        for nm in names:
+            _fill(nm, _valid_of(nm))
+
+    def _submit_and_observe(sel):
+        start_url = page.url
+        try:
+            btn = page.locator(submit_selector).first
+            if btn.count() > 0:
+                btn.click(timeout=1500, no_wait_after=True)
+        except Exception:
+            pass
+        page.wait_for_timeout(180)
+        obs = page.evaluate(_OBSERVE_JS, sel)
+        # submit blocked = we did not navigate away AND no visible success toast
+        try:
+            toast = page.evaluate(
+                "() => !!document.querySelector('.sonner-toast,[data-sonner-toast],"
+                ".Toastify__toast--success,[role=status]')")
+        except Exception:
+            toast = False
+        blocked = (page.url == start_url) and not toast
+        return obs, blocked
+
+    _fill_baseline()
+
     for name in names:
         sel = field_selectors[name]
         meta = meta_by_name.get(name, {"name": name})
-        for c in field_value_cases(meta):
-            rec = {"field": name, "case": c["case"], "expect": c["expect"],
-                   "value": c["value"][:24], "status": "SKIP", "signal": ""}
+        for c in field_value_cases(meta, rich=rich):
+            rec = {"field": name, "case": c["case"], "method": c.get("method"),
+                   "expect": c["expect"], "value": str(c["value"])[:24],
+                   "status": "SKIP", "signal": ""}
             try:
-                loc = page.locator(sel).first
-                if loc.count() == 0:
+                if page.locator(sel).first.count() == 0:
                     results.append(rec); continue
-                # set the value + trigger validation
-                try:
-                    loc.fill(c["value"], timeout=2500)
-                except Exception:
-                    rec["status"] = "SKIP"; rec["signal"] = "not fillable"; results.append(rec); continue
-                try: loc.blur(timeout=1000)
+                if not _fill(name, str(c["value"])):
+                    rec["signal"] = "not fillable"; results.append(rec); continue
+                try: page.locator(sel).first.blur(timeout=800)
                 except Exception: pass
-                # nudge form-level validation by attempting submit (non-fatal)
-                try:
-                    btn = page.locator(submit_selector).first
-                    if btn.count() > 0:
-                        btn.click(timeout=1200, no_wait_after=True)
-                except Exception:
-                    pass
-                obs = page.evaluate(_OBSERVE_JS, sel)
-                rejected = bool(obs.get("native") or obs.get("aria") or obs.get("err"))
+                obs, blocked = _submit_and_observe(sel)
+                err_signalled = bool(obs.get("native") or obs.get("aria") or obs.get("err"))
+                rejected = err_signalled or blocked
                 rec["signal"] = ("native" if obs.get("native") else
                                  "aria-invalid" if obs.get("aria") else
-                                 (f"msg:{obs.get('err')}" if obs.get("err") else "—"))
+                                 (f"msg:{obs.get('err')}" if obs.get("err") else
+                                  ("submit-blocked" if blocked else "—")))
                 exp = c["expect"]
-                if exp == "reject":
-                    rec["status"] = "PASS" if rejected else "FAIL"   # FAIL = frontend accepted bad input
+                if exp in ("reject", "reject_or_truncate"):
+                    rec["status"] = "PASS" if rejected else "FAIL"   # FAIL = bad input accepted
                 elif exp == "accept":
-                    rec["status"] = "PASS" if not rejected else "FAIL"
-                else:  # no_crash / reject_or_truncate → PASS unless the page died
+                    rec["status"] = "PASS" if not err_signalled else "FAIL"
+                else:  # no_crash → PASS unless the page threw / went blank
                     rec["status"] = "PASS"
             except Exception as e:
                 rec["status"] = "SKIP"; rec["signal"] = f"err:{type(e).__name__}"
             results.append(rec)
+        _fill(name, _valid_of(name))   # restore this field before the next one
 
     passed = sum(1 for r in results if r["status"] == "PASS")
     failed = sum(1 for r in results if r["status"] == "FAIL")
@@ -214,7 +266,12 @@ if __name__ == "__main__":
       <button type="submit">Save</button>
     </form>"""
     with sync_playwright() as p:
-        b = p.chromium.launch(headless=True); pg = b.new_page()
+        import os as _os
+        _kw = {"headless": True}
+        _exe = _os.environ.get("PLAYWRIGHT_CHROMIUM_PATH") or (
+            "/opt/pw-browsers/chromium" if _os.path.exists("/opt/pw-browsers/chromium") else None)
+        if _exe: _kw["executable_path"] = _exe
+        b = p.chromium.launch(**_kw); pg = b.new_page()
         pg.set_content(HTML)
         def check(sel, val):
             pg.locator(sel).fill(val); pg.locator(sel).blur()
