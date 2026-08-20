@@ -221,7 +221,7 @@ agent "<task>":
 | `spec_oracle` | OpenAPI/Swagger → contract tests |
 | `explorer` | AI edge-case proposals (grounding-filtered) |
 | `http_runner` | API assertions (status class, off-origin guard, auth-skip, attribution) |
-| `db_runner` | DB assertions (sqlite/pg/mysql; injection-safe; invariant/cross-layer/FK) |
+| `db_runner` | DB assertions (sqlite/pg/mysql; injection-safe; invariant/cross-layer/FK); `fetch_row` for the flat-path edge oracle's STORED leg |
 | `db_seeder` / `fixtures` | self-contained SQLite from schema + FK-ordered orphan-free rows |
 | `playwright_runner` | browser nav/fill/submit, workflow post-condition, a11y |
 | `field_mapper` / `vision_gemini` | DOM field→selector map + vision fallback |
@@ -239,5 +239,8 @@ agent "<task>":
 > edge oracle, requirement oracle, page-docs RAG→AI + offline-rag, repo-wide mutation,
 > pairwise combinatorial) and the Q2 / S4 bug fixes are documented in
 > [`COVERAGE_UPGRADE.md`](COVERAGE_UPGRADE.md). New `test` flags: `--combinatorial[-strength|-max]`,
-> `--mutate-repo`, `--mutate-discover`, `--mutate-budget/-per-file-cap/-time-budget`.
+> `--mutate-repo`, `--mutate-discover`, `--mutate-budget/-per-file-cap/-time-budget`,
+> `--mutate-scope` (scope the per-mutant suite to the mutated file's endpoints — fast
+> live scoring), `--edge-oracle`/`--no-edge-oracle` (per-write read-back edge+requirement
+> oracle on the flat `test` path, on by default).
 | `main` | optional FastAPI wrapper (scan/graph) |

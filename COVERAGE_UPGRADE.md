@@ -158,16 +158,30 @@ or `--combinatorial`) runs.
   collects into `field_edge_oracle` and `requirement_oracle`, attaching verdicts under
   `result["oracleFindings"]` (strictly additive — never changes the scenario's own
   PASS/FAIL). Covered by a new self-test (harness now 30/30).
+- **Edge + requirement oracles are also auto-invoked on the flat `test` path.** After a
+  successful CREATE (POST), the runner issues a real **read-back GET** for the created
+  resource, optionally reads the **stored DB row** (new `DBRunner.fetch_row`, S9-safe +
+  parameterized), and runs both oracles over submitted → stored → read_back; findings
+  attach to `tc_result["oracleFindings"]` and print a one-line note on corruption /
+  violation. Additive (never changes PASS/FAIL); on by default, `--no-edge-oracle` off.
+- **Mutation is now scoped to the mutated file's own endpoints** (`--mutate-scope`,
+  default `auto`): a mutant in `ProductController` is only catchable by `/products`
+  checks, so the per-mutant suite drops from ~354 endpoints to ~21 (via the graph's
+  controllerName→endpoint map, or a resource-name heuristic). This makes a **fast live
+  mutation score** practical — the previous full-suite baseline (595 checks, many hanging
+  to timeout) was the sole blocker.
 
 ## Honest remaining gaps
 
-1. **UI breadth** — the browser path is proven end-to-end, but exhaustive per-page /
-   per-field UI coverage (and data-backed pages needing seeded rows) is a breadth exercise
-   still to be widened.
-2. **A full-suite live mutation score** — needs a faster endpoint set (many ecosudar
-   endpoints hang to timeout), so the fast score used a scoped oracle.
-3. The requirement/edge oracles are wired into the **scenario** runner; threading them into
-   the flat `test` per-assertion path (which doesn't do read-back per write) is still open.
+1. **UI breadth** — the browser path is proven end-to-end (real login + five protected
+   pages audited), but exhaustive per-page / per-field UI coverage (and data-backed pages
+   needing seeded rows) is a breadth exercise still to be widened. This is *volume of
+   runs*, not a missing capability.
+
+**Now closed (were open in the first pass):**
+- ✅ *Oracles on the flat `test` path* — done via the per-write read-back pass above.
+- ✅ *Fast live mutation score* — done via `--mutate-scope auto`; the endpoint-hang
+  blocker is removed by only running the mutated file's own checks.
 
 ## Verification
 

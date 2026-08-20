@@ -279,10 +279,14 @@ deterministic self-test in the pytest harness (`tests/test_selftests.py`, 29/29 
 credits the auth-skip decision, so a real 401/403 is a genuine result, not a wrongly
 SKIPPED test), and the S4 CRLF mutation-restore fix.
 
-**Honestly not yet done:** in-browser UI black-box on all pages (needs the React SPA
-served — live runs used `--no-browser`), a completed live mutation kill count (discovery
-ran; execution was stopped early against timing-out endpoints), and auto-invoking the
-requirement + RAG-offline oracles in every per-assertion pass of the default runner.
+**Also wired since:** the edge + requirement oracles are auto-invoked on **both** the
+scenario runner and the flat `test` path (a real read-back GET + DB-row read per write),
+and mutation is **scoped to the mutated file's endpoints** (`--mutate-scope auto`) so a
+live kill score is fast. The UI browser path is proven end-to-end (real login + five
+protected pages audited live).
+
+**Honestly still open:** exhaustive per-page / per-field UI *breadth* (a volume-of-runs
+exercise, not a capability gap — data-backed pages also need seeded rows).
 
 ---
 
