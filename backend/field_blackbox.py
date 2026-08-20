@@ -124,8 +124,30 @@ def _write_tables(ep_id: str, out: Dict[Tuple[str, str], List[str]]) -> List[str
     return tables
 
 
+def _col_field_meta(col: Dict[str, Any]) -> Dict[str, Any]:
+    """Map a DB column to the field-battery input (name/type/required/maxLength/enum)."""
+    dt = str(col.get("dataType") or "")
+    name = str(col.get("name") or "")
+    if _enum_values(dt):
+        ftype = "enum"
+    elif _is_numeric(dt):
+        ftype = "number"
+    elif _is_date(dt):
+        ftype = "date"
+    elif _EMAIL_NAME.search(name):
+        ftype = "email"
+    else:
+        ftype = "text"
+    required = (not col.get("isNullable", True) and not col.get("hasDefault")
+                and not col.get("isAutoIncrement"))
+    return {"name": name, "type": ftype, "required": required,
+            "maxLength": _maxlen(dt), "enum": _enum_values(dt)}
+
+
 def generate_field_blackbox_tests(graph_data: Dict[str, Any],
-                                  max_cases: int = 4000) -> List[Dict[str, Any]]:
+                                  max_cases: int = 4000,
+                                  rich: bool = True,
+                                  rich_max_per_method: int = 12) -> List[Dict[str, Any]]:
     endpoints = graph_data.get("apiEndpoints", []) or []
     tables    = graph_data.get("dbTables", []) or []
     nodes     = graph_data.get("nodes", []) or []
@@ -221,6 +243,28 @@ def generate_field_blackbox_tests(graph_data: Dict[str, Any],
 
         # A schema-valid baseline body (all writable fields valid).
         baseline = {c["name"]: _valid_value(c) for c in writable}
+
+        # RICH battery: many cases per method per field (single-fault). Each rich
+        # case is applied on top of the valid baseline with faultField/faultCase set
+        # for Q5 attribution; expectation comes from the case's `expect`.
+        if rich:
+            from field_battery import rich_field_cases
+            _EXPECT = {"reject": C4, "reject_or_truncate": C4,
+                       "no_crash": NO5, "accept": {"expectedStatusClass": "!4xx"}}
+            for col in writable:
+                cn = col["name"]
+                for rc in rich_field_cases(_col_field_meta(col), max_per_method=rich_max_per_method):
+                    b = dict(baseline); b[cn] = rc["value"]
+                    add(ep_str, method, table, cn, rc["method"], b,
+                        _EXPECT.get(rc["expect"], C4),
+                        f"[{rc['case']}] {rc['method']} case")
+                    if n[0] >= max_cases:
+                        return tests
+            add(ep_str, method, table, "*", "smoke", dict(baseline), NO5,
+                "valid baseline does not crash server")
+            if n[0] >= max_cases:
+                return tests
+            continue
 
         # One-field-at-a-time faults.
         for col in writable:
@@ -500,7 +544,7 @@ def field_coverage_report(graph_data: Dict[str, Any],
     A field is COVERED when at least one of the two generators emits a battery for
     it. UNCOVERED fields carry the reason (table unresolved, UI-only field with no
     endpoint binding, structural id/timestamp column, etc.) so the gap is visible."""
-    schema_tests   = generate_field_blackbox_tests(graph_data)
+    schema_tests   = generate_field_blackbox_tests(graph_data, rich=False)
     contract_tests = generate_contract_negative_tests(graph_data)
     covered: set = set()
     for t in schema_tests + contract_tests:
@@ -576,7 +620,7 @@ if __name__ == "__main__":
             {"name": "created_at", "dataType": "TIMESTAMP",     "isPrimaryKey": False, "isNullable": True},
         ]}],
     }
-    tests = generate_field_blackbox_tests(graph)
+    tests = generate_field_blackbox_tests(graph, rich=False)
     by_case = {}
     for t in tests:
         by_case[t["subtype"]] = by_case.get(t["subtype"], 0) + 1
@@ -602,6 +646,27 @@ if __name__ == "__main__":
             assert exp == "!5xx"
         else:
             assert exp == "4xx", f"{t['subtype']} should expect 4xx"
+
+    # ── RICH battery (default): many cases per method per field ──
+    rich_tests = generate_field_blackbox_tests(graph, rich=True, rich_max_per_method=12)
+    rich_by = {}
+    for t in rich_tests:
+        rich_by[t["subtype"]] = rich_by.get(t["subtype"], 0) + 1
+    # rich mode must emit many more cases than the lean one-per-method path
+    assert len(rich_tests) > len(tests) * 3, (len(rich_tests), len(tests))
+    for m in ("format", "type", "length", "fuzz_xss", "fuzz_sqli", "fuzz_misc"):
+        assert rich_by.get(m, 0) >= 5, (m, rich_by)
+    # fuzz cases expect !5xx (robustness); everything else expects 4xx (or !4xx for valid)
+    for t in rich_tests:
+        exp = t["assertions"][0].get("expectedStatusClass")
+        if t["subtype"].startswith("fuzz") or t["subtype"] == "smoke":
+            assert exp == "!5xx", (t["subtype"], exp)
+        else:
+            assert exp in ("4xx", "!4xx"), (t["subtype"], exp)
+        # Q5 attribution carried for every non-smoke fault
+        if t["subtype"] != "smoke":
+            assert t["assertions"][0].get("faultField"), t["title"]
+    print(f"rich battery: {len(rich_tests)} cases (vs {len(tests)} lean) — by method {rich_by}")
 
     # ── contract-rule-driven negative generation (generate_contract_negative_tests) ──
     import json, os

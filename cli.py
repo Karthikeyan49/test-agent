@@ -1052,7 +1052,10 @@ def cmd_test(args):
                 "nodes":        gb.to_dict().get("nodes", []),
                 "edges":        gb.to_dict().get("edges", []),
             }
-            fbb = generate_field_blackbox_tests(fbb_graph, max_cases=getattr(args, 'field_blackbox_max', 4000))
+            fbb = generate_field_blackbox_tests(
+                fbb_graph, max_cases=getattr(args, 'field_blackbox_max', 4000),
+                rich=not getattr(args, 'field_blackbox_lean', False),
+                rich_max_per_method=getattr(args, 'field_blackbox_rich_max', 12))
             if fbb:
                 by = {}
                 for t in fbb:
@@ -1781,6 +1784,8 @@ Examples:
     tp.add_argument("--ui-base-url",   help="Frontend base URL for UI steps (default: same as --base-url); use when the SPA and API are on different hosts")
     tp.add_argument("--field-blackbox", action="store_true", help="DEPTH: generate the full per-field black-box battery (required/type/format/length/enum/boundary/fuzz-robustness) for every writable field. NOTE: the fuzz-robustness case only asserts the server does not 5xx on a hostile-looking string — it is NOT a vulnerability/injection check.")
     tp.add_argument("--field-blackbox-max", type=int, default=4000, help="Cap on per-field black-box cases (default: 4000)")
+    tp.add_argument("--field-blackbox-rich-max", type=int, default=12, help="RICH battery: max cases per method per field (default: 12 — e.g. 12 malformed emails, 12 boundary values, 12 XSS/SQLi vectors each).")
+    tp.add_argument("--field-blackbox-lean", action="store_true", help="Use the lean one-case-per-method battery instead of the rich multi-case-per-method battery (default is rich).")
     tp.add_argument("--edge-oracle", dest="edge_oracle", action="store_true", default=True, help="After each successful CREATE (POST), issue a read-back GET (and a DB row read when --db is set) and run the in/out edge + requirement oracles over submitted -> stored -> read_back. Additive: never changes a case's PASS/FAIL. On by default.")
     tp.add_argument("--no-edge-oracle", dest="edge_oracle", action="store_false", help="Disable the per-write read-back edge/requirement oracle pass.")
     tp.add_argument("--combinatorial", action="store_true", help="DEPTH: generate pairwise (t-wise) combinatorial tests — multiple fields wrong TOGETHER, not just single-fault isolation. A seeded covering array keeps the count bounded (pairwise, not full cross-product).")
