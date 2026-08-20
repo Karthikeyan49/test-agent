@@ -351,7 +351,32 @@ def run_mutation_mode(args, test_cases):
     """
     import urllib.request
     from http_runner import HTTPRunner
-    from mutation import MutationTester
+    from mutation import (MutationTester, discover_mutants, discovery_summary,
+                          plan_execution)
+
+    # ── Repo-wide DISCOVERY (dry-run) — the honest "how many mutants?" answer ──
+    # Needs no app and no PHP: it enumerates every candidate mutant across the tree.
+    _repo_root = getattr(args, 'mutate_repo', None) or (
+        getattr(args, 'mutate_discover', False) and (args.path or "."))
+    if getattr(args, 'mutate_discover', False):
+        root = _repo_root or (args.path or ".")
+        section("Mutation Discovery (dry-run — repo-wide mutant census)")
+        catalog = discover_mutants(root)
+        summ = discovery_summary(catalog)
+        budget = getattr(args, 'mutate_budget', 50)
+        plan = plan_execution(catalog, budget, getattr(args, 'mutate_per_file_cap', 0))
+        print(f"{CYAN}[+] Root: {root}{RESET}")
+        print(f"  {BOLD}Discovered mutants : {summ['discovered']}{RESET} "
+              f"across {summ['files']} file(s)")
+        print(f"  Would execute      : {plan['sampled']} at budget={budget} "
+              f"{DIM}(~{plan['estimatedSeconds']/60:.1f} min; each = one full suite re-run){RESET}")
+        print(f"  {DIM}by operator: {summ['byOperator']}{RESET}")
+        top = sorted(summ['byFile'].items(), key=lambda kv: -kv[1])[:8]
+        for f, n in top:
+            print(f"    {DIM}• {os.path.relpath(f)}: {n}{RESET}")
+        print(f"\n  {DIM}This is the true denominator — a prior run showing only a "
+              f"handful of mutants was a budget cap, not the repo's real count.{RESET}")
+        return
 
     base_url = args.base_url or "http://localhost:3000"
     auth = _build_auth(args, base_url)
@@ -359,18 +384,27 @@ def run_mutation_mode(args, test_cases):
     if auth.is_active():
         print(f"{GREEN}[✓] Auth active — mutation suite carries {'Cookie' if auth.mode=='cookie' else auth.header}{RESET}")
 
-    # Resolve target files (comma-separated; relative to --path when given).
+    repo_mode = bool(getattr(args, 'mutate_repo', None))
     files = []
-    for raw in [p.strip() for p in args.mutate.split(",") if p.strip()]:
-        cand = raw if os.path.isabs(raw) else (
-            os.path.join(args.path, raw) if args.path else raw)
-        if os.path.isfile(cand):
-            files.append(os.path.abspath(cand))
-        else:
-            print(f"{YELLOW}[!] Mutation target not found: {raw}{RESET}")
-    if not files:
-        print(f"{RED}[✗] No valid --mutate target files.{RESET}")
-        sys.exit(1)
+    if repo_mode:
+        # Repo-wide: discover the catalog across the tree (files derived from it).
+        _catalog = discover_mutants(args.mutate_repo)
+        if not _catalog:
+            print(f"{RED}[✗] No mutants discovered under {args.mutate_repo}.{RESET}")
+            sys.exit(1)
+        files = list(dict.fromkeys(m["file"] for m in _catalog))
+    else:
+        # Resolve target files (comma-separated; relative to --path when given).
+        for raw in [p.strip() for p in (args.mutate or "").split(",") if p.strip()]:
+            cand = raw if os.path.isabs(raw) else (
+                os.path.join(args.path, raw) if args.path else raw)
+            if os.path.isfile(cand):
+                files.append(os.path.abspath(cand))
+            else:
+                print(f"{YELLOW}[!] Mutation target not found: {raw}{RESET}")
+        if not files:
+            print(f"{RED}[✗] No valid --mutate target files.{RESET}")
+            sys.exit(1)
 
     # Distinct API checks (dedupe by method+endpoint) so each suite run is fast.
     seen, api_units = set(), []
@@ -420,8 +454,25 @@ def run_mutation_mode(args, test_cases):
                 failed += 1
         return passed, failed
 
+    # Honest discovery census before executing anything — the true denominator.
+    catalog = (discover_mutants(args.mutate_repo) if repo_mode
+               else [m for f in files for m in discover_mutants(f)])
+    _census = discovery_summary(catalog)
+    print(f"{BOLD}[i] Discovered {_census['discovered']} mutant(s) across "
+          f"{_census['files']} file(s){RESET} {DIM}by operator {_census['byOperator']}{RESET}")
+
     print(f"{DIM}Running baseline (clean source)…{RESET}")
-    result = MutationTester().run(files, run_tests, max_mutants_per_file=args.mutate_max)
+    if repo_mode:
+        print(f"{CYAN}[+] Executing a bounded sample: budget={args.mutate_budget} "
+              f"per_file_cap={args.mutate_per_file_cap or '∞'}{RESET}")
+        result = MutationTester().execute_catalog(
+            catalog, run_tests, budget=args.mutate_budget,
+            per_file_cap=getattr(args, 'mutate_per_file_cap', 0),
+            time_budget_seconds=getattr(args, 'mutate_time_budget', 0))
+        # normalize execute_catalog's shape to the printer below
+        result.setdefault("mutantsTried", result.get("executed", 0))
+    else:
+        result = MutationTester().run(files, run_tests, max_mutants_per_file=args.mutate_max)
 
     if result.get("error"):
         print(f"{RED}[✗] {result['error']}{RESET}")
@@ -676,6 +727,23 @@ def cmd_test(args):
     repo_path = os.path.abspath(args.path) if args.path else None
     engine    = PythonSystemIntelligenceEngine()
 
+    # Repo-wide mutation DISCOVERY is a pure static census — no graph, no app, no
+    # test generation needed. Short-circuit here so `--mutate-discover` works on any
+    # source tree directly (answers "how many mutants does my repo really have?").
+    if getattr(args, 'mutate_discover', False):
+        run_mutation_mode(args, [])
+        return
+
+    # Optional page-docs corpus (page-wise .md knowledge) — grounds the honest
+    # field-coverage denominator with UI fields the schema/contracts don't name.
+    _page_docs_corpus = None
+    try:
+        from page_docs import load_page_docs
+        _pd_dir = getattr(args, "page_docs_dir", None) or "./page_docs"
+        _page_docs_corpus = load_page_docs(_pd_dir) or None
+    except Exception:
+        _page_docs_corpus = None
+
     # Load existing graph JSON if provided, else re-scan
     if args.graph and os.path.isfile(args.graph):
         print(f"{CYAN}[+] Loading system graph from: {args.graph}{RESET}")
@@ -827,6 +895,50 @@ def cmd_test(args):
         except Exception as e:
             print(f"{YELLOW}[!] Per-field black-box generation failed: {e}{RESET}")
 
+    # Combinatorial (pairwise) DEPTH — beyond single-fault isolation, exercise
+    # multiple fields being wrong TOGETHER. A seeded covering array keeps the count
+    # bounded (pairwise, not full cross-product). Opt-in (--combinatorial).
+    if getattr(args, 'combinatorial', False):
+        try:
+            from combinatorial import generate_combinatorial_tests
+            comb_graph = _loaded if (_loaded and (_loaded.get("requestContracts") or _loaded.get("apiEndpoints"))) else {
+                "requestContracts": analysis.get("requestContracts", []) if isinstance(analysis, dict) else [],
+                "apiEndpoints":     analysis.get("apiEndpoints", []),
+                "dbTables":         analysis.get("dbResult", {}).get("tables", []),
+            }
+            comb = generate_combinatorial_tests(
+                comb_graph,
+                strength=getattr(args, 'combinatorial_strength', 2),
+                max_cases=getattr(args, 'combinatorial_max', 2000))
+            if comb:
+                print(f"{GREEN}[✓] + {len(comb)} combinatorial (pairwise) test(s) — "
+                      f"multi-field interaction coverage{RESET}")
+            test_cases += comb
+        except Exception as e:
+            print(f"{YELLOW}[!] Combinatorial generation failed: {e}{RESET}")
+
+    # Honest field-coverage accounting — the true denominator across DB columns,
+    # contract fields AND page-docs UI fields, so the report states which fields were
+    # exercised and which were not (and why). Printed whenever field-depth is on.
+    if getattr(args, 'field_blackbox', False) or getattr(args, 'combinatorial', False):
+        try:
+            from field_blackbox import field_coverage_report
+            cov_graph = _loaded if (_loaded and _loaded.get("apiEndpoints")) else {
+                "apiEndpoints": analysis.get("apiEndpoints", []),
+                "dbTables":     analysis.get("dbResult", {}).get("tables", []),
+                "requestContracts": analysis.get("requestContracts", []) if isinstance(analysis, dict) else [],
+                "nodes":        gb.to_dict().get("nodes", []),
+                "edges":        gb.to_dict().get("edges", []),
+            }
+            cov = field_coverage_report(cov_graph, page_docs=_page_docs_corpus)
+            print(f"{BOLD}[i] Field coverage: {cov['covered']}/{cov['total']} "
+                  f"fields exercised ({cov['coverage']*100:.0f}%), {cov['uncovered']} "
+                  f"uncovered {DIM}[db={cov['bySource']['db']} "
+                  f"contract={cov['bySource']['contract']} page_docs={cov['bySource']['page_docs']}]{RESET}")
+            _field_coverage = cov
+        except Exception as e:
+            print(f"{YELLOW}[!] Field-coverage report failed: {e}{RESET}")
+
     # Exploratory edge-case scenarios (experimental) — LLM proposes, grounded on the graph
     if getattr(args, 'explore', False):
         try:
@@ -853,7 +965,7 @@ def cmd_test(args):
 
     # Mutation-testing mode: instead of one normal run, inject bugs into the given
     # source files and measure how many the suite catches (the real test-quality KPI).
-    if getattr(args, 'mutate', None):
+    if getattr(args, 'mutate', None) or getattr(args, 'mutate_repo', None) or getattr(args, 'mutate_discover', False):
         run_mutation_mode(args, test_cases)
         return
 
@@ -1465,7 +1577,12 @@ Examples:
     tp.add_argument("--seed-fixtures", action="store_true", help="(default; kept for back-compat) insert FK-ordered fixture rows with --seed-db")
     tp.add_argument("--no-fixtures",  action="store_true", help="With --seed-db, leave tables empty (skip fixture rows)")
     tp.add_argument("--mutate",       help="Mutation testing: comma-separated source files to mutate; re-runs the API suite against --base-url and reports the mutation score (how many injected bugs the suite catches)")
-    tp.add_argument("--mutate-max",   type=int, default=8, help="Max mutants per file for --mutate (default: 8)")
+    tp.add_argument("--mutate-max",   type=int, default=8, help="Max mutants per file for the fixed-file --mutate path (default: 8)")
+    tp.add_argument("--mutate-repo",  help="Repo-wide mutation: a DIRECTORY to discover mutants across (all matching source files), then execute a bounded, stratified, seeded sample. Reports discovered-vs-executed honestly.")
+    tp.add_argument("--mutate-discover", action="store_true", help="DRY-RUN: discover and report the true repo-wide mutant count (per file / per operator) WITHOUT executing anything — no app, no PHP needed. Answers 'how many mutants does my repo actually have?'.")
+    tp.add_argument("--mutate-budget", type=int, default=50, help="Repo-wide mutation: max mutants to actually execute from the discovered catalog (default: 50). Each executed mutant re-runs the whole suite, so this bounds wall-clock time.")
+    tp.add_argument("--mutate-per-file-cap", type=int, default=0, help="Repo-wide mutation: cap mutants executed per file so one huge file can't dominate the sample (0 = no cap).")
+    tp.add_argument("--mutate-time-budget", type=float, default=0, help="Repo-wide mutation: soft wall-clock cap in seconds (0 = none).")
     tp.add_argument("--mutate-reset-url", help="URL to hit between mutants to reset a server-side code cache (default: {base_url}/clear-cache.php; falls back to a timed wait)")
     tp.add_argument("--openapi",      help="Path to an OpenAPI/Swagger spec — derive contract tests (happy path, required-field negatives, documented errors)")
     tp.add_argument("--explore",      action="store_true", help="[experimental] AI proposes edge-case scenarios (grounded on the graph) that templates miss")
@@ -1477,6 +1594,9 @@ Examples:
     tp.add_argument("--ui-base-url",   help="Frontend base URL for UI steps (default: same as --base-url); use when the SPA and API are on different hosts")
     tp.add_argument("--field-blackbox", action="store_true", help="DEPTH: generate the full per-field black-box battery (required/type/format/length/enum/boundary/fuzz-robustness) for every writable field. NOTE: the fuzz-robustness case only asserts the server does not 5xx on a hostile-looking string — it is NOT a vulnerability/injection check.")
     tp.add_argument("--field-blackbox-max", type=int, default=4000, help="Cap on per-field black-box cases (default: 4000)")
+    tp.add_argument("--combinatorial", action="store_true", help="DEPTH: generate pairwise (t-wise) combinatorial tests — multiple fields wrong TOGETHER, not just single-fault isolation. A seeded covering array keeps the count bounded (pairwise, not full cross-product).")
+    tp.add_argument("--combinatorial-strength", type=int, default=2, choices=[1, 2], help="Combinatorial strength: 1 = each value-class once; 2 = pairwise (default).")
+    tp.add_argument("--combinatorial-max", type=int, default=2000, help="Global cap on combinatorial cases (default: 2000).")
     tp.add_argument("--auth-token",     help="Static bearer token sent on every request (test protected endpoints)")
     tp.add_argument("--auth-cookie",    help="Session cookie sent on every request, e.g. 'PHPSESSID=abc123' (for cookie/session auth instead of a bearer token)")
     tp.add_argument("--auth-login-url", help="Login URL/path to obtain a token before testing")
@@ -1511,7 +1631,9 @@ Examples:
     if args.command == "scan":
         cmd_scan(args)
     elif args.command == "test":
-        if not args.path and not args.graph:
+        # --mutate-discover is a static census over a source tree; it needs neither
+        # a graph nor a scanned repo path.
+        if not args.path and not args.graph and not getattr(args, "mutate_discover", False):
             tp.print_help()
             print(f"\n{RED}[✗] Provide --path (repo directory) or --graph (existing graph JSON){RESET}")
             sys.exit(1)
