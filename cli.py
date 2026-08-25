@@ -1303,6 +1303,19 @@ def cmd_test(args):
     skipped_count = 0
     start_total  = time.time()
 
+    # Live recorder: writes every test to an append-only JSONL ledger + HTML the moment
+    # it finishes, in parallel with execution (--live-report DIR). Also periodically
+    # re-renders the HTML so a run in progress can be watched live.
+    _recorder = None
+    if getattr(args, "live_report", None):
+        try:
+            from test_recorder import TestRecorder, render_ledger
+            _recorder = TestRecorder(args.live_report)
+            print(f"{GREEN}[✓] Live ledger: {_recorder.jsonl} (+ ledger.html, refreshed as tests run){RESET}")
+        except Exception as e:
+            print(f"{YELLOW}[!] Live recorder unavailable: {e}{RESET}")
+            _recorder = None
+
     for i, tc in enumerate(test_cases, start=1):
         print(f"\n{BOLD}[{i}/{total}] {tc['id']}: {tc['title']}{RESET}")
 
@@ -1357,6 +1370,9 @@ def cmd_test(args):
                 print(f"  {RED}→ FAIL  ({tag}){RESET}")
             tc_result["durationMs"] = round((time.time() - start_tc) * 1000, 2)
             run_results.append(tc_result)
+            if _recorder:
+                _recorder.record(tc_result)
+                if _recorder.n % 50 == 0: render_ledger(_recorder.jsonl, _recorder.html)
             continue
 
         # 1. Playwright browser execution (only for UI tests that carry steps)
@@ -1472,6 +1488,9 @@ def cmd_test(args):
                 print(f"    {RED}✗ {reason}{RESET}")
 
         run_results.append(tc_result)
+        if _recorder:
+            _recorder.record(tc_result)
+            if _recorder.n % 50 == 0: render_ledger(_recorder.jsonl, _recorder.html)
 
     total_duration = round((time.time() - start_total) * 1000, 2)
 
@@ -1485,6 +1504,16 @@ def cmd_test(args):
     section("Test Execution Summary")
     executed  = passed_count + failed_count
     pass_rate = (passed_count / executed * 100) if executed else 0.0
+
+    if _recorder:
+        try:
+            html_path = _recorder.finalize({
+                "total": total, "passed": passed_count, "failed": failed_count,
+                "skipped": skipped_count, "executed": executed,
+                "passRate": round(pass_rate, 1)})
+            print(f"{GREEN}[✓] Live ledger finalized: {html_path} ({_recorder.n} tests recorded){RESET}")
+        except Exception as e:
+            print(f"{YELLOW}[!] Ledger finalize failed: {e}{RESET}")
 
     # Technique / category coverage breakdown
     by_tech = {}
@@ -1831,6 +1860,7 @@ Examples:
     tp.add_argument("--preset", choices=["smoke", "deep"], help="Convenience preset: 'smoke' = fast API-only pass (no browser); 'deep' = field-blackbox + scenarios. Explicit flags still override.")
     tp.add_argument("--config", help="Path to a YAML config file whose keys set defaults for test flags (explicit CLI flags override).")
     tp.add_argument("--history-file", help="JSONL run-history file (default: .systemintel_runs.jsonl). Each run appends a summary and prints the delta vs the previous run.")
+    tp.add_argument("--live-report", help="Record EVERY test in parallel with execution to DIR/ledger.jsonl (one flushed line per test) and DIR/ledger.html (a filterable, searchable ledger refreshed as the run progresses). Captures all tests even if the run is interrupted.")
     tp.add_argument("--allow-nonlocal-writes", action="store_true", help="SAFETY: permit mutating requests (POST/PUT/PATCH/DELETE) against a NON-local --base-url. Off by default — use ONLY on a disposable staging target you control, NEVER production.")
     tp.add_argument("--include-response-bodies", action="store_true", help="Keep live HTTP response bodies in the saved report (redacted by default, since they can contain PII/tokens).")
 
