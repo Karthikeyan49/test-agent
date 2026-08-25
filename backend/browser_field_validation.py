@@ -123,6 +123,201 @@ def _valid_ui_value(meta: Dict[str, Any]) -> str:
     return "ValidValue"
 
 
+# ── ENUM / dropdown-domain method (in the browser) ────────────────────────────
+# Reads a live choice control's ALLOWED option domain so the oracle knows the
+# legal set, then attempts an OUT-OF-DOMAIN value and observes the frontend.
+
+# Enumerate a native <select>'s options, or classify a custom combobox trigger.
+_CHOICE_DETECT_JS = r"""
+(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return {found:false};
+  const tag  = el.tagName.toLowerCase();
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  if (tag === 'select') {
+    const opts = Array.prototype.map.call(el.options,
+      o => ({value:o.value, label:(o.textContent||'').trim()}));
+    return {found:true, kind:'select', required: !!el.required,
+            multiple: !!el.multiple, value: el.value, options: opts};
+  }
+  // shadcn/Radix comboboxes: a button[role=combobox] (or any [role=combobox]/
+  // element owning a [role=listbox] popup). An <input role=combobox> is editable.
+  const isCombo = role === 'combobox' || role === 'listbox' ||
+                  el.getAttribute('aria-haspopup') === 'listbox';
+  return {found:true, kind: isCombo ? 'combobox' : 'other', role, tag,
+          editable: tag === 'input',
+          required: el.getAttribute('aria-required') === 'true' || !!el.required};
+}
+"""
+
+# Read the visible option labels of an OPEN listbox popup (custom combobox).
+_LISTBOX_OPTIONS_JS = r"""
+() => Array.prototype.slice.call(document.querySelectorAll('[role=option]'))
+  .filter(o => o.offsetParent !== null)
+  .map(o => (o.textContent || '').trim())
+  .filter(t => t.length)
+"""
+
+# Force a value onto a native <select> via JS and report whether it STUCK
+# (a correct <select> refuses a value that is not one of its options).
+_SET_SELECT_VALUE_JS = r"""
+(args) => {
+  const el = document.querySelector(args.sel);
+  if (!el) return {found:false};
+  try {
+    el.value = args.value;
+    el.dispatchEvent(new Event('input',  {bubbles:true}));
+    el.dispatchEvent(new Event('change', {bubbles:true}));
+  } catch(e){}
+  return {found:true, stuck: el.value === args.value,
+          value: el.value, selectedIndex: el.selectedIndex};
+}
+"""
+
+
+def _signal_of(obs: Dict[str, Any], blocked: bool) -> str:
+    """Derive the same short signal string used by run_browser_field_validation."""
+    return ("native" if obs.get("native") else
+            "aria-invalid" if obs.get("aria") else
+            (f"msg:{obs.get('err')}" if obs.get("err") else
+             ("submit-blocked" if blocked else "—")))
+
+
+def detect_choice_control(page, selector: str) -> Dict[str, Any]:
+    """DETECT a choice control at `selector` in the LIVE DOM and enumerate its
+    allowed option domain — so the enum oracle knows the legal set.
+
+    Returns {kind, options, values, required, editable, multiple}:
+      • kind "select"   — native <select>; `options` are option labels, `values`
+                          the non-empty option values.
+      • kind "combobox" — custom shadcn/Radix combobox; opened, its visible
+                          [role=option] labels read, then closed (Escape).
+                          `editable` true when the trigger is a text <input>.
+      • kind "none"     — not a choice control (text/number/email/etc.).
+    Duck-typed on Playwright `page` (.evaluate / .locator / .keyboard).
+    """
+    empty = {"kind": "none", "options": [], "values": [],
+             "required": False, "editable": False, "multiple": False}
+    try:
+        info = page.evaluate(_CHOICE_DETECT_JS, selector)
+    except Exception:
+        return dict(empty)
+    if not info or not info.get("found"):
+        return dict(empty)
+
+    if info.get("kind") == "select":
+        opts = info.get("options") or []
+        values = [o.get("value") for o in opts if o.get("value") not in (None, "")]
+        labels = [o.get("label") for o in opts if o.get("label")]
+        return {"kind": "select", "options": labels, "values": values,
+                "required": bool(info.get("required")), "editable": False,
+                "multiple": bool(info.get("multiple"))}
+
+    if info.get("kind") == "combobox":
+        options: List[str] = []
+        try:
+            page.locator(selector).first.click(timeout=1500)
+            page.wait_for_timeout(120)
+            options = page.evaluate(_LISTBOX_OPTIONS_JS) or []
+            try: page.keyboard.press("Escape")
+            except Exception: pass
+            page.wait_for_timeout(60)
+        except Exception:
+            pass
+        return {"kind": "combobox", "options": options, "values": list(options),
+                "required": bool(info.get("required")),
+                "editable": bool(info.get("editable")), "multiple": False}
+
+    return dict(empty)
+
+
+# a token no correctly-domained control should ever hold or offer
+_OUT_OF_DOMAIN = "__not_in_domain__"
+
+
+def enum_browser_cases(page, name: str, selector: str, control: Dict[str, Any],
+                       submit_and_observe, restore_valid) -> List[Dict[str, Any]]:
+    """Run the ENUM (dropdown-domain) black-box method against a live choice
+    control and return result records shaped exactly like the other cases in
+    run_browser_field_validation (field/case/method/expect/value/status/signal).
+
+    `control` comes from detect_choice_control. `submit_and_observe(sel)` is the
+    harness's submit-then-read closure returning (obs, blocked). `restore_valid()`
+    puts the control back onto a valid option before the next case.
+
+    Honesty rules:
+      • native <select> that the browser REFUSES to hold out-of-domain → SKIP
+        (structurally impossible), never PASS.
+      • combobox that only allows selecting from its own list → the editable
+        out-of-domain probe is SKIPped (structurally impossible), reported so.
+    """
+    recs: List[Dict[str, Any]] = []
+
+    def rec(case, status, signal, value=""):
+        recs.append({"field": name, "case": case, "method": "enum",
+                     "expect": "reject", "value": str(value)[:24],
+                     "status": status, "signal": signal})
+
+    kind = control.get("kind")
+
+    if kind == "select":
+        # (1) OUT-OF-DOMAIN: try to force a bogus string onto the <select>.
+        try:
+            r = page.evaluate(_SET_SELECT_VALUE_JS, {"sel": selector, "value": _OUT_OF_DOMAIN})
+        except Exception:
+            r = {"stuck": False}
+        if not r.get("stuck"):
+            # The browser reset selectedIndex to -1 / value to "" — the control
+            # genuinely cannot hold an out-of-domain value. Honest SKIP, not PASS.
+            rec("enum_out_of_domain", "SKIP",
+                "native <select> refused out-of-domain value (structurally impossible)",
+                _OUT_OF_DOMAIN)
+        else:
+            obs, blocked = submit_and_observe(selector)
+            rejected = bool(obs.get("native") or obs.get("aria") or obs.get("err")) or blocked
+            rec("enum_out_of_domain", "PASS" if rejected else "FAIL",
+                _signal_of(obs, blocked), _OUT_OF_DOMAIN)
+        restore_valid()
+
+        # (2) required <select> left with NO selection (empty placeholder option).
+        if control.get("required"):
+            try:
+                page.evaluate(_SET_SELECT_VALUE_JS, {"sel": selector, "value": ""})
+            except Exception:
+                pass
+            obs, blocked = submit_and_observe(selector)
+            rejected = bool(obs.get("native") or obs.get("aria") or obs.get("err")) or blocked
+            rec("enum_required_empty", "PASS" if rejected else "FAIL",
+                _signal_of(obs, blocked), "")
+            restore_valid()
+
+    elif kind == "combobox":
+        options = control.get("options") or []
+        # (1) STRUCTURAL: the enumerated domain must not offer an out-of-domain entry.
+        rec("enum_domain_closed",
+            "PASS" if _OUT_OF_DOMAIN not in options else "FAIL",
+            f"options={len(options)}; out-of-domain not offered", _OUT_OF_DOMAIN)
+        # (2) EDITABLE combobox: type an out-of-domain string and submit.
+        if control.get("editable"):
+            try:
+                page.locator(selector).first.fill(_OUT_OF_DOMAIN, timeout=1500)
+                obs, blocked = submit_and_observe(selector)
+                rejected = bool(obs.get("native") or obs.get("aria") or obs.get("err")) or blocked
+                rec("enum_editable_out_of_domain", "PASS" if rejected else "FAIL",
+                    _signal_of(obs, blocked), _OUT_OF_DOMAIN)
+            except Exception as e:
+                rec("enum_editable_out_of_domain", "SKIP", f"err:{type(e).__name__}",
+                    _OUT_OF_DOMAIN)
+            restore_valid()
+        else:
+            # select-only widget: out-of-domain cannot be entered at all.
+            rec("enum_editable_out_of_domain", "SKIP",
+                "combobox only allows selecting from its own list — "
+                "out-of-domain structurally impossible")
+
+    return recs
+
+
 def run_browser_field_validation(page, route: str, base_url: str,
                                  field_selectors: Dict[str, str],
                                  fields_meta: Optional[List[Dict[str, Any]]] = None,
@@ -159,6 +354,17 @@ def run_browser_field_validation(page, route: str, base_url: str,
     if max_fields:
         names = names[:max_fields]
 
+    # Detect choice controls ONCE so enum fields join the valid baseline with a
+    # real option (they can't be text-filled) and get the enum method below.
+    controls: Dict[str, Dict[str, Any]] = {}
+    for nm in names:
+        try:
+            ci = detect_choice_control(page, field_selectors[nm])
+        except Exception:
+            ci = {"kind": "none"}
+        if ci.get("kind") in ("select", "combobox"):
+            controls[nm] = ci
+
     def _valid_of(nm):
         return _valid_ui_value(meta_by_name.get(nm, {"name": nm}))
 
@@ -169,9 +375,51 @@ def run_browser_field_validation(page, route: str, base_url: str,
         except Exception:
             return False
 
+    def _select_valid(nm):
+        """Put a choice control onto a real, valid option (for baseline / restore)."""
+        ctl = controls.get(nm)
+        sel = field_selectors[nm]
+        if not ctl:
+            return False
+        if ctl["kind"] == "select":
+            vals = ctl.get("values") or []
+            if not vals:
+                return False
+            try:
+                page.locator(sel).first.select_option(vals[0], timeout=1500)
+                return True
+            except Exception:
+                try:
+                    page.evaluate(_SET_SELECT_VALUE_JS, {"sel": sel, "value": vals[0]})
+                    return True
+                except Exception:
+                    return False
+        # combobox: open and click its first real option
+        try:
+            page.locator(sel).first.click(timeout=1500)
+            page.wait_for_timeout(100)
+            opt = page.locator("[role=option]").first
+            if opt.count() > 0:
+                opt.click(timeout=1500)
+                return True
+            try: page.keyboard.press("Escape")
+            except Exception: pass
+        except Exception:
+            pass
+        return False
+
+    def _restore(nm):
+        if nm in controls:
+            _select_valid(nm)
+        else:
+            _fill(nm, _valid_of(nm))
+
     def _fill_baseline():
         for nm in names:
-            _fill(nm, _valid_of(nm))
+            if nm in controls:
+                _select_valid(nm)
+            else:
+                _fill(nm, _valid_of(nm))
 
     def _submit_and_observe(sel):
         start_url = page.url
@@ -198,6 +446,20 @@ def run_browser_field_validation(page, route: str, base_url: str,
     for name in names:
         sel = field_selectors[name]
         meta = meta_by_name.get(name, {"name": name})
+        # Choice control → the ENUM (dropdown-domain) method, not the text battery
+        # (a <select>/combobox can't be text-filled). Additive; text/number/email
+        # fields below are untouched.
+        if name in controls:
+            try:
+                results.extend(enum_browser_cases(
+                    page, name, sel, controls[name],
+                    _submit_and_observe, lambda n=name: _select_valid(n)))
+            except Exception as e:
+                results.append({"field": name, "case": "enum_error", "method": "enum",
+                                "expect": "reject", "value": "", "status": "SKIP",
+                                "signal": f"err:{type(e).__name__}"})
+            _select_valid(name)   # leave it valid for the next field's baseline
+            continue
         for c in field_value_cases(meta, rich=rich):
             rec = {"field": name, "case": c["case"], "method": c.get("method"),
                    "expect": c["expect"], "value": str(c["value"])[:24],
@@ -226,7 +488,7 @@ def run_browser_field_validation(page, route: str, base_url: str,
             except Exception as e:
                 rec["status"] = "SKIP"; rec["signal"] = f"err:{type(e).__name__}"
             results.append(rec)
-        _fill(name, _valid_of(name))   # restore this field before the next one
+        _restore(name)   # restore this field before the next one
 
     passed = sum(1 for r in results if r["status"] == "PASS")
     failed = sum(1 for r in results if r["status"] == "FAIL")
@@ -263,6 +525,11 @@ if __name__ == "__main__":
     HTML = """<form>
       <div><input id="email" type="email" required></div>
       <div><input id="name" type="text" maxlength="10" required></div>
+      <div><select id="choice" required>
+             <option value="">--</option>
+             <option value="a">A</option>
+             <option value="b">B</option>
+           </select></div>
       <button type="submit">Save</button>
     </form>"""
     with sync_playwright() as p:
@@ -284,6 +551,40 @@ if __name__ == "__main__":
         assert bad.get("native") is True,  f"bad email should be native-invalid: {bad}"
         assert good.get("native") is False, f"valid email should pass: {good}"
         assert empty.get("native") is True, f"empty required should be invalid: {empty}"
+
+        # ── ENUM / required-select handling (native <select>) ──
+        ctl = detect_choice_control(pg, "#choice")
+        assert ctl["kind"] == "select", ctl
+        assert ctl["values"] == ["a", "b"], ctl        # legal domain enumerated
+        assert ctl["required"] is True, ctl
+        # a bogus out-of-domain value cannot STICK on a native <select>
+        r = pg.evaluate(_SET_SELECT_VALUE_JS, {"sel": "#choice", "value": "__nope__"})
+        assert r["stuck"] is False, f"native select must refuse out-of-domain: {r}"
+        # required select left empty → native-invalid
+        pg.evaluate(_SET_SELECT_VALUE_JS, {"sel": "#choice", "value": ""})
+        empty_sel = pg.evaluate(_OBSERVE_JS, "#choice")
+        assert empty_sel.get("native") is True, f"empty required select invalid: {empty_sel}"
+        # a real option is accepted
+        pg.evaluate(_SET_SELECT_VALUE_JS, {"sel": "#choice", "value": "a"})
+        ok_sel = pg.evaluate(_OBSERVE_JS, "#choice")
+        assert ok_sel.get("native") is False, f"valid option should pass: {ok_sel}"
+
+        # drive the enum method end-to-end and assert HONEST verdicts
+        def _sao(s):
+            start = pg.url
+            try: pg.locator('button[type=submit]').click(timeout=800, no_wait_after=True)
+            except Exception: pass
+            pg.wait_for_timeout(120)
+            return pg.evaluate(_OBSERVE_JS, s), (pg.url == start)
+        recs = enum_browser_cases(pg, "choice", "#choice", ctl, _sao,
+                                  lambda: pg.evaluate(_SET_SELECT_VALUE_JS,
+                                                      {"sel": "#choice", "value": "a"}))
+        by = {rr["case"]: rr["status"] for rr in recs}
+        # out-of-domain can't stick on a native <select> → honest SKIP (never PASS)
+        assert by.get("enum_out_of_domain") == "SKIP", recs
+        # required-empty select IS caught (native invalid / blocked) → PASS
+        assert by.get("enum_required_empty") == "PASS", recs
         b.close()
     print("[live] native-validity detector: bad email✗ / valid✓ / empty-required✗ — correct")
+    print("[live] enum method: out-of-domain SKIP(honest) / required-empty PASS — correct")
     print("SELF-TEST PASS")
