@@ -34,6 +34,15 @@ decides; a SKIP is never a PASS"):
     • No definite violation but an UNKNOWABLE class present (e.g. an empty optional
       field) ⇒ the correct behaviour is undecidable ⇒ SKIP, never a PASS.
 
+Pairwise (strength=2) is the DEFAULT, but the same driver scales up to a truly
+exhaustive run when you want one:
+    • strength>=3  → a t-wise covering array (every t-way field-class interaction).
+    • exhaustive=True → the genuine cartesian product of "each field valid-or-one-bad"
+      across the selected fields — ∏(classes per field) combinations (k^N uniform).
+    • cap=0 / cap=None → no row bound at all (the full array / full cartesian).
+The submit-then-observe oracle below is UNCHANGED in every mode: a combination that
+contains any bad value must be rejected, or it FAILs.
+
 Generation is pure standard library and deterministic (seedable). Execution needs
 a live Playwright page (see run_browser_combinatorial).
 """
@@ -172,18 +181,118 @@ def _onewise(params: List[List[int]], cap: int) -> List[List[int]]:
     return (_cov_onewise or _fallback_onewise)(params, cap)
 
 
+# ── uncapped sentinel: cap 0 or None ⇒ no row-count bound at all ───────────────
+_UNCAPPED = 1 << 62
+
+
+def _norm_cap(cap: Optional[int]) -> int:
+    """0 or None ⇒ genuinely uncapped (the exhaustive setting); a positive int is a
+    hard bound on the number of rows returned."""
+    if cap is None or cap <= 0:
+        return _UNCAPPED
+    return int(cap)
+
+
+def _exhaustive_rows(params: List[List[int]], cap: int) -> List[List[int]]:
+    """The TRUE cartesian product of every field's value-classes: each field is
+    independently valid-or-one-bad, and every such combination is enumerated. For
+    N participating fields with k_i classes each this is ∏ k_i rows (k^N when
+    uniform). `cap` (already normalized) bounds it; _UNCAPPED means all rows."""
+    from itertools import product
+    if not params:
+        return []
+    rows: List[List[int]] = []
+    for combo in product(*params):
+        rows.append([int(x) for x in combo])
+        if len(rows) >= cap:
+            break
+    return rows
+
+
+def _fallback_twise(params: List[List[int]], t: int, cap: int) -> List[List[int]]:
+    """Deterministic greedy t-wise covering array (generalizes _fallback_pairwise):
+    every combination of values across ANY t fields appears in >=1 row. t=1 →
+    one-wise, t>=n → the full cartesian. Completeness (when uncapped) is guaranteed
+    by the outer loop — each iteration seeds an as-yet-uncovered t-tuple — while the
+    per-column greedy only chooses which value covers the most remaining t-tuples."""
+    from itertools import combinations, product
+    n = len(params)
+    if t <= 1:
+        return _fallback_onewise(params, cap)
+    if n == 0:
+        return []
+    if t >= n:
+        return _exhaustive_rows(params, cap)
+
+    # every t-way target interaction: (column-tuple, value-tuple)
+    uncovered = set()
+    for cols in combinations(range(n), t):
+        for vals in product(*(params[c] for c in cols)):
+            uncovered.add((cols, vals))
+
+    rows: List[List[int]] = []
+    while uncovered and len(rows) < cap:
+        seed_cols, seed_vals = min(uncovered)      # deterministic seed
+        row: List[Optional[int]] = [None] * n
+        for c, v in zip(seed_cols, seed_vals):
+            row[c] = v
+        assigned = list(seed_cols)
+        for f in range(n):
+            if row[f] is not None:
+                continue
+            best_v, best_cov = params[f][0], -1
+            for v in params[f]:
+                cov = 0
+                if len(assigned) >= t - 1:
+                    for other in combinations(assigned, t - 1):
+                        cols = tuple(sorted(other + (f,)))
+                        vals = tuple(v if c == f else row[c] for c in cols)
+                        if (cols, vals) in uncovered:
+                            cov += 1
+                if cov > best_cov:
+                    best_cov, best_v = cov, v
+            row[f] = best_v
+            assigned.append(f)
+        for cols in combinations(range(n), t):
+            uncovered.discard((cols, tuple(row[c] for c in cols)))
+        rows.append([int(x) for x in row])
+    return rows
+
+
+def _twise(params: List[List[int]], t: int, cap: int) -> List[List[int]]:
+    """t-wise covering array. strength 2 reuses the shared pairwise core (so its
+    output is byte-identical to the default); strength >=3 uses the generalized
+    greedy above (combinatorial.py exposes no t>2 core to reuse)."""
+    if t <= 1:
+        return _onewise(params, cap)
+    if t == 2:
+        return _pairwise(params, cap)
+    return _fallback_twise(params, t, cap)
+
+
 # ── pairwise combinations over a set of fields ────────────────────────────────
 def pairwise_field_combinations(field_classes: Dict[str, List[Dict[str, Any]]],
-                                strength: int = 2, cap: int = 200,
-                                seed: int = 0) -> List[Dict[str, str]]:
+                                strength: int = 2, cap: Optional[int] = 200,
+                                seed: int = 0,
+                                exhaustive: bool = False) -> List[Dict[str, str]]:
     """Build a covering array over the given fields and return one dict per
     combination mapping field name → chosen class label.
 
     Only fields with >=2 value-classes take part in the array (a single-class field
     adds no interaction and is simply always its one class). `seed` deterministically
     permutes the participating-field order before covering — a reproducible knob that
-    varies the array without ever losing pair coverage. `strength` 2 = pairwise,
-    1 = each class of each field at least once. `cap` bounds the row count."""
+    varies the array without ever losing coverage.
+
+    Modes:
+      • `exhaustive=True`  → the TRUE cartesian product: every field independently
+        valid-or-one-bad, all ∏(classes) combinations (k^N when uniform). `strength`
+        is ignored. This is the genuinely-exhaustive multi-field run.
+      • `strength=2` (default) → pairwise: every 2-way field-class pair appears.
+      • `strength>=3`         → t-wise: every t-way field-class interaction appears.
+      • `strength<=1`         → one-wise: each class of each field at least once.
+
+    `cap` bounds the returned row count; `cap=0` or `cap=None` means UNCAPPED (the
+    full covering array / full cartesian)."""
     names_all = list(field_classes.keys())
     active = [nm for nm in names_all if len(field_classes[nm]) >= 2]
     fixed = [nm for nm in names_all if nm not in active]
@@ -196,10 +305,13 @@ def pairwise_field_combinations(field_classes: Dict[str, List[Dict[str, Any]]],
 
     params = [list(range(len(field_classes[nm]))) for nm in active_ord]
 
-    if len(params) >= 2 and strength >= 2:
-        rows = _pairwise(params, cap)
+    ncap = _norm_cap(cap)
+    if exhaustive:
+        rows = _exhaustive_rows(params, ncap)
+    elif len(params) >= 2 and strength >= 2:
+        rows = _twise(params, strength, ncap)
     else:
-        rows = _onewise(params, cap)
+        rows = _onewise(params, ncap)
 
     combos: List[Dict[str, str]] = []
     for row in rows:
@@ -217,11 +329,18 @@ def run_browser_combinatorial(page, route: str, base_url: str,
                               field_selectors: Dict[str, str],
                               fields_meta: Optional[List[Dict[str, Any]]] = None,
                               submit_selector: str = 'button[type="submit"]',
-                              strength: int = 2, cap: int = 200,
+                              strength: int = 2, cap: Optional[int] = 200,
                               max_classes_per_field: int = 4,
-                              seed: int = 0) -> Dict[str, Any]:
-    """Drive a real form at `route` through a PAIRWISE covering array of MULTI-field
-    bad states and record, per combination, which fields the frontend flags.
+                              seed: int = 0,
+                              exhaustive: bool = False) -> Dict[str, Any]:
+    """Drive a real form at `route` through a covering array of MULTI-field bad
+    states and record, per combination, which fields the frontend flags.
+
+    By default this is a PAIRWISE (2-wise) sweep. For a truly exhaustive run pass
+    `exhaustive=True` (the full cartesian of every field valid-or-one-bad) or raise
+    `strength` (3 = 3-wise, etc.); set `cap=0`/`cap=None` to lift the row bound. The
+    submit-then-observe verdict is unchanged: any combination that contains a bad
+    value must be rejected (a bad field flagged, or the submit blocked) or it FAILs.
 
     `field_selectors` maps field name → a real CSS selector (build with
     backend/field_mapper.map_form_fields). `fields_meta` supplies each field's
@@ -248,7 +367,7 @@ def run_browser_combinatorial(page, route: str, base_url: str,
     class_by_label = {nm: {c["cls"]: c for c in cs} for nm, cs in classes_by_name.items()}
 
     combos = pairwise_field_combinations(classes_by_name, strength=strength,
-                                         cap=cap, seed=seed)
+                                         cap=cap, seed=seed, exhaustive=exhaustive)
 
     # ── navigate once; refill a valid baseline between combinations ──
     page.goto(f"{base_url.rstrip('/')}{route}", timeout=20000)
@@ -430,6 +549,47 @@ if __name__ == "__main__":
     assert len(capped) <= 5, "cap not enforced"
     print(f"[offline] cap=5 → {len(capped)} combos (bounded)")
 
+    # ── EXHAUSTIVE mode: the TRUE cartesian of every field valid-or-one-bad ─────
+    exhaustive = pairwise_field_combinations(fc, exhaustive=True, cap=0)
+    assert len(exhaustive) == full_cross, (len(exhaustive), full_cross)
+    # every full-cross field-class assignment appears exactly once, no dupes
+    seen_combos = {tuple(sorted(c.items())) for c in exhaustive}
+    assert len(seen_combos) == full_cross, "exhaustive must be the full cartesian, unique"
+    # and it is a strict superset of what pairwise covers
+    assert full_cross > len(combos), (full_cross, len(combos))
+    print(f"[offline] exhaustive (cap=0) → {len(exhaustive)} combos == full cross-product "
+          f"∏{list(per_field.values())} = {full_cross}")
+
+    # ── t-WISE (strength=3): every 3-way field-class interaction appears ───────
+    tri = pairwise_field_combinations(fc, strength=3, cap=0)
+    want3 = set()
+    for a in range(len(active)):
+        for b in range(a + 1, len(active)):
+            for cc in range(b + 1, len(active)):
+                na, nb, nd = active[a], active[b], active[cc]
+                for ca in range(per_field[na]):
+                    for cb in range(per_field[nb]):
+                        for cd in range(per_field[nd]):
+                            want3.add(((idx[na], ca), (idx[nb], cb), (idx[nd], cd)))
+    got3 = set()
+    for combo in tri:
+        for a in range(len(active)):
+            for b in range(a + 1, len(active)):
+                for cc in range(b + 1, len(active)):
+                    na, nb, nd = active[a], active[b], active[cc]
+                    got3.add(((idx[na], cls_i[na][combo[na]]),
+                              (idx[nb], cls_i[nb][combo[nb]]),
+                              (idx[nd], cls_i[nd][combo[nd]])))
+    assert not (want3 - got3), f"3-wise INCOMPLETE — missing {len(want3 - got3)} triples"
+    assert len(combos) <= len(tri) <= full_cross, (len(combos), len(tri), full_cross)
+    assert pairwise_field_combinations(fc, strength=3, cap=0) == tri, "t-wise not deterministic"
+    print(f"[offline] strength=3 → {len(tri)} combos, covers every 3-way interaction "
+          f"(pairwise {len(combos)} ≤ 3-wise {len(tri)} ≤ exhaustive {full_cross})")
+
+    # cap still bounds the exhaustive/t-wise modes
+    assert len(pairwise_field_combinations(fc, exhaustive=True, cap=10)) == 10, "cap on exhaustive"
+    assert len(pairwise_field_combinations(fc, strength=3, cap=7)) <= 7, "cap on t-wise"
+
     # ── LIVE: guarded end-to-end against a real native <form> (no app server) ──
     try:
         from playwright.sync_api import sync_playwright
@@ -483,6 +643,10 @@ if __name__ == "__main__":
             summary = run_browser_combinatorial(
                 pg, "/", base_url, field_selectors, fields_meta,
                 submit_selector='button[type="submit"]', strength=2, cap=200)
+            # EXHAUSTIVE end-to-end: same form, same oracle, full cartesian of states
+            summary_ex = run_browser_combinatorial(
+                pg, "/", base_url, field_selectors, fields_meta,
+                submit_selector='button[type="submit"]', exhaustive=True, cap=0)
             b.close()
     finally:
         httpd.shutdown()
@@ -501,4 +665,16 @@ if __name__ == "__main__":
           f"{summary['passed']} pass / {summary['failed']} fail / {summary['skipped']} skip")
     print(f"[live] multi-bad combo {detected[0]['fields']} → bad={detected[0]['bad']} "
           f"flagged={detected[0]['flagged']} ({detected[0]['signal']})")
+
+    # EXHAUSTIVE run: enumerates the full cartesian (> the pairwise count), same
+    # oracle ⇒ still zero gaps on a native form, and it drives EVERY both-bad state.
+    # (with only 2 fields, pairwise already IS the full cartesian, so >= not >)
+    assert summary_ex["combinations"] >= summary["combinations"], (
+        summary_ex["combinations"], summary["combinations"])
+    assert summary_ex["failed"] == 0, f"exhaustive found a phantom gap: {summary_ex}"
+    ex_multi_bad = [r for r in summary_ex["results"] if len(r["bad"]) >= 2]
+    assert ex_multi_bad, f"exhaustive must drive >=2-bad combos: {summary_ex}"
+    print(f"[live] exhaustive → {summary_ex['combinations']} combos "
+          f"({summary_ex['passed']} pass / {summary_ex['failed']} fail / "
+          f"{summary_ex['skipped']} skip); {len(ex_multi_bad)} had >=2 bad fields")
     print("SELF-TEST PASS")
