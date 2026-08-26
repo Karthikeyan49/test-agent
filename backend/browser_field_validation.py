@@ -604,6 +604,54 @@ def enum_browser_cases(page, name: str, selector: str, control: Dict[str, Any],
     return recs
 
 
+# Resolve the REAL submit control. Many React forms are div-based with a plain
+# <button>Add Expense</button> (no type=submit), so a bare button[type=submit]
+# locator matches nothing and the form is never submitted — which silently makes
+# every "submit-then-observe" verdict read as "blocked/rejected". This scans for a
+# visible primary-action button by text, excluding cancel/nav/sidebar/pickers, and
+# stamps it with data-sysintel-submit so a stable selector is available.
+_SUBMIT_RESOLVE_JS = r"""(preferSel) => {
+  const pre = preferSel ? document.querySelector(preferSel) : null;
+  if (pre && pre.offsetParent !== null) { pre.setAttribute('data-sysintel-submit','1'); return true; }
+  const vis = el => { const r = el.getBoundingClientRect();
+    return el.offsetParent !== null && r.width > 0 && r.height > 0 && !el.disabled; };
+  const inChrome = el => el.closest('header,nav,aside,[role=navigation],[data-sidebar],[data-radix-popper-content-wrapper]');
+  const POS = /\b(save|add|create|submit|register|confirm|update|post|send|place\s*order|check\s*out|continue|next|finish|apply)\b/i;
+  const NEG = /\b(cancel|close|back|clear|reset|delete|remove|logout|sign\s*out|photo|upload|gallery|toggle|search|filter|export|import|print)\b/i;
+  const cands = Array.from(document.querySelectorAll('button, input[type=submit], [role=button]'))
+    .filter(vis).filter(b => !inChrome(b));
+  // type=submit first
+  let hit = cands.find(b => (b.getAttribute('type')||'').toLowerCase() === 'submit');
+  // else last button whose text is action-ish and not negative (primary action is usually last/bottom)
+  if (!hit) {
+    const scored = cands.filter(b => { const t = (b.textContent||b.value||'').trim();
+      return t && POS.test(t) && !NEG.test(t); });
+    hit = scored.length ? scored[scored.length - 1] : null;
+  }
+  if (hit) { hit.setAttribute('data-sysintel-submit','1'); return true; }
+  return false;
+}"""
+
+
+def resolve_submit_selector(page, prefer: str = 'button[type="submit"]') -> Optional[str]:
+    """Return a CSS selector for the form's real submit button, or None. Prefers
+    `prefer` when it matches a visible element; otherwise finds a visible primary
+    action button by text (save/add/create/…), excluding cancel/nav/pickers."""
+    try:
+        ok = page.evaluate(_SUBMIT_RESOLVE_JS, prefer)
+        return "[data-sysintel-submit='1']" if ok else None
+    except Exception:
+        return None
+
+
+# Only a SUCCESS-typed toast (or an actual navigation) counts as "submitted". A
+# bare [role=status] live-region persists on these pages and must NOT be read as
+# success — doing so flips every verdict to "accepted".
+_SUCCESS_TOAST_JS = ("() => !!document.querySelector('"
+    ".sonner-toast[data-type=\"success\"],[data-sonner-toast][data-type=\"success\"],"
+    ".Toastify__toast--success,.toast-success,[data-status=\"success\"]')")
+
+
 def run_browser_field_validation(page, route: str, base_url: str,
                                  field_selectors: Dict[str, str],
                                  fields_meta: Optional[List[Dict[str, Any]]] = None,
@@ -762,24 +810,53 @@ def run_browser_field_validation(page, route: str, base_url: str,
 
     def _submit_and_observe(sel):
         start_url = page.url
+        # Resolve the real submit control fresh each time (button[type=submit] is
+        # often absent on these div-based forms; the stamp is also lost on any
+        # navigation/reload) — the primary action is a plain <button>Add …</button>.
+        _rs = resolve_submit_selector(page, submit_selector) or submit_selector
         try:
-            btn = page.locator(submit_selector).first
+            btn = page.locator(_rs).first
             if btn.count() > 0:
                 btn.click(timeout=1500, no_wait_after=True)
         except Exception:
             pass
-        page.wait_for_timeout(180)
+        page.wait_for_timeout(220)
         obs = page.evaluate(_OBSERVE_JS, sel)
-        # submit blocked = we did not navigate away AND no visible success toast
+        # submitted = we navigated away OR a SUCCESS-typed toast appeared; a bare
+        # [role=status] live-region on these pages must NOT count as success.
         try:
-            toast = page.evaluate(
-                "() => !!document.querySelector('.sonner-toast,[data-sonner-toast],"
-                ".Toastify__toast--success,[role=status]')")
+            toast = page.evaluate(_SUCCESS_TOAST_JS)
         except Exception:
             toast = False
         blocked = (page.url == start_url) and not toast
         return obs, blocked
 
+    def _ensure_on_form():
+        """Return to the form and refill the valid baseline if a submit navigated
+        away (a successful/accepted submit resets or leaves the form)."""
+        try:
+            if not page.url.rstrip("/").endswith(route.rstrip("/")):
+                page.goto(base_url.rstrip("/") + route, wait_until="networkidle", timeout=20000)
+                page.wait_for_timeout(350)
+                _fill_baseline()
+        except Exception:
+            pass
+
+    _fill_baseline()
+
+    # ── baseline trust probe ───────────────────────────────────────────────
+    # Submit the FULLY-VALID baseline once. Only if it actually submits is a
+    # per-case "submit blocked" attributable to the single bad field. If the form
+    # blocks every submit anyway (other constraints unmet, or a strict field the
+    # generic baseline can't satisfy), a block is NOT evidence the bad value was
+    # rejected — so those verdicts are SKIPped as untrusted, never a false PASS.
+    _probe_sel = next(iter(selectors.values()), "body")
+    try:
+        _pobs, _pblocked = _submit_and_observe(_probe_sel)
+        baseline_submits = not _pblocked
+    except Exception:
+        baseline_submits = False
+    _ensure_on_form()
     _fill_baseline()
 
     # HONESTY: if this form genuinely exposes no choice control, say so once —
@@ -826,8 +903,19 @@ def run_browser_field_validation(page, route: str, base_url: str,
                                  (f"msg:{obs.get('err')}" if obs.get("err") else
                                   ("submit-blocked" if blocked else "—")))
                 exp = c["expect"]
+                # A "submit blocked" is only trustworthy evidence of rejection when
+                # the clean baseline itself submits; otherwise the form blocks every
+                # submit regardless of this field, so the block is not attributable.
+                attributable_block = blocked and baseline_submits
+                trusted_reject = err_signalled or attributable_block
                 if exp in ("reject", "reject_or_truncate"):
-                    rec["status"] = "PASS" if rejected else "FAIL"   # FAIL = bad input accepted
+                    if trusted_reject:
+                        rec["status"] = "PASS"
+                    elif not blocked:
+                        rec["status"] = "FAIL"   # form ACCEPTED the bad value
+                    else:
+                        rec["status"] = "SKIP"   # blocked, but baseline won't submit → untrusted
+                        rec["signal"] = "untrusted: baseline does not submit"
                 elif exp == "accept":
                     rec["status"] = "PASS" if not err_signalled else "FAIL"
                 else:  # no_crash → PASS unless the page threw / went blank
@@ -835,6 +923,7 @@ def run_browser_field_validation(page, route: str, base_url: str,
             except Exception as e:
                 rec["status"] = "SKIP"; rec["signal"] = f"err:{type(e).__name__}"
             results.append(rec)
+            _ensure_on_form()   # a bad value that was accepted navigates away — reset
         _restore(name)   # restore this field before the next one
 
     passed = sum(1 for r in results if r["status"] == "PASS")
@@ -844,7 +933,7 @@ def run_browser_field_validation(page, route: str, base_url: str,
     return {"route": route, "fieldsTested": len(names), "cases": len(results),
             "passed": passed, "failed": failed, "skipped": skipped,
             "choiceControls": len(controls), "enumCases": len(enum_results),
-            "results": results}
+            "baselineSubmits": baseline_submits, "results": results}
 
 
 if __name__ == "__main__":
