@@ -412,7 +412,17 @@ def _scope_api_units_to_files(api_units, files, args):
 
     scoped = [u for u in api_units if _unit_in_scope(u)]
     if not scoped:
-        return api_units, "all endpoints (no scoped match found — falling back)"
+        # No endpoint's path carries the controller's resource token. Such a
+        # controller is almost certainly not exercised by any check, so its
+        # mutants will survive regardless — running ALL ~598 checks per mutant
+        # (each a full suite re-run) is enormous wasted time for the same verdict.
+        # Fall back to a bounded, deterministic safety-net sample instead: enough
+        # to still catch a kill if the heuristic missed the real endpoint, without
+        # the pathological cost. Override with --mutate-scope all for the full set.
+        cap = int(getattr(args, 'mutate_fallback_cap', 40) or 40)
+        sample = sorted(api_units, key=lambda u: u.get("endpoint", ""))[:cap]
+        return sample, (f"{len(sample)} endpoint(s) — bounded fallback sample "
+                        f"(no resource-token match; use --mutate-scope all for every endpoint)")
     how = "graph controllerName" if used_graph else "resource-name heuristic"
     return scoped, f"{len(scoped)} endpoint(s) served by the mutated file(s) [{how}]"
 
@@ -1870,6 +1880,7 @@ Examples:
     tp.add_argument("--mutate-per-file-cap", type=int, default=0, help="Repo-wide mutation: cap mutants executed per file so one huge file can't dominate the sample (0 = no cap).")
     tp.add_argument("--mutate-time-budget", type=float, default=0, help="Repo-wide mutation: soft wall-clock cap in seconds (0 = none).")
     tp.add_argument("--mutation-ledger", help="Repo-wide mutation: append a per-mutant JSONL row (killed AND survived) to this file as each mutant runs — for a live/unified test ledger.")
+    tp.add_argument("--mutate-fallback-cap", type=int, default=40, help="Mutation scoping: when a mutated file's resource token matches no endpoint, cap the safety-net fallback suite to this many endpoints instead of all of them (0/none disables the cap). Default 40.")
     tp.add_argument("--mutate-scope", default="auto", help="Which endpoints the mutation suite re-runs per mutant: 'auto' (default) = only the endpoints the mutated file serves (fast, via the graph's controller→endpoint map or a resource-name heuristic); 'all' = every endpoint (slow). A mutant is only catchable by checks that exercise its code, so 'auto' gives the same kills far faster.")
     tp.add_argument("--mutate-reset-url", help="URL to hit between mutants to reset a server-side code cache (default: {base_url}/clear-cache.php; falls back to a timed wait)")
     tp.add_argument("--openapi",      help="Path to an OpenAPI/Swagger spec — derive contract tests (happy path, required-field negatives, documented errors)")
