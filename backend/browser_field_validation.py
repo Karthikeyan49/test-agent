@@ -151,11 +151,131 @@ _CHOICE_DETECT_JS = r"""
 """
 
 # Read the visible option labels of an OPEN listbox popup (custom combobox).
+# shadcn/Radix Select renders options as [role=option]; cmdk command-palette
+# comboboxes render [cmdk-item] (which usually ALSO carry role=option) — reading
+# both, plus [role=menuitem*], reliably captures either style. Options render in a
+# portal at document level, so we query document-wide while the popup is open.
 _LISTBOX_OPTIONS_JS = r"""
-() => Array.prototype.slice.call(document.querySelectorAll('[role=option]'))
-  .filter(o => o.offsetParent !== null)
-  .map(o => (o.textContent || '').trim())
-  .filter(t => t.length)
+() => {
+  const SEL = '[role=option],[cmdk-item],[role=menuitem],[role=menuitemradio]';
+  const seen = new Set(), out = [];
+  Array.prototype.slice.call(document.querySelectorAll(SEL)).forEach(o => {
+    if (o.offsetParent === null) return;                 // must be visible
+    const t = (o.getAttribute('aria-label') || o.textContent || '').trim();
+    if (t && t.length < 120 && !seen.has(t)) { seen.add(t); out.push(t); }
+  });
+  return out;
+}
+"""
+
+# Is there a visible free-text SEARCH input inside the currently-open popup?
+# (cmdk / cmdk-input, an <input> inside an open [role=dialog] or Radix popper).
+# Its presence means the combobox is EDITABLE — a value can be typed, so an
+# out-of-domain probe is possible; its absence means select-only.
+_OPEN_SEARCH_INPUT_JS = r"""
+() => {
+  const inp = document.querySelector(
+    '[cmdk-input],[role=dialog] input,[data-radix-popper-content-wrapper] input,' +
+    '[role=listbox] input,input[role=combobox]');
+  return { found: !!(inp && inp.offsetParent !== null) };
+}
+"""
+
+# Type a value into the open popup's search input and report the visible options
+# that remain after filtering (so the oracle can see whether an out-of-domain
+# string can be committed, e.g. via a "create new"/"add" affordance).
+_TYPE_IN_OPEN_SEARCH_JS = r"""
+(val) => {
+  const inp = document.querySelector(
+    '[cmdk-input],[role=dialog] input,[data-radix-popper-content-wrapper] input,' +
+    '[role=listbox] input,input[role=combobox]');
+  if (!inp || inp.offsetParent === null) return { found: false };
+  try {
+    inp.focus(); inp.value = val;
+    inp.dispatchEvent(new Event('input',  {bubbles:true}));
+    inp.dispatchEvent(new Event('change', {bubbles:true}));
+  } catch (e) {}
+  return { found: true, value: inp.value };
+}
+"""
+
+# DISCOVER every choice control on the live page, INDEPENDENT of the field map.
+# The DOM field mapper only inventories <input>/<select>/<textarea>, so shadcn/
+# Radix comboboxes (rendered as <button role=combobox>) are invisible to it —
+# which is why the enum method used to fire 0 cases. This stamps each control
+# with a stable data-attribute and returns a selector + label for it. TAB
+# triggers (role=tab / data-radix-collection-item inside a [role=tablist]) are
+# explicitly excluded — they are navigation, not choice controls. `mapped` is the
+# list of already-mapped field selectors, whose elements are skipped to avoid
+# double-testing a control the text battery already owns.
+_DISCOVER_CHOICE_JS = r"""
+(mapped) => {
+  const out = [], seen = new Set();
+  let n = 0;
+  const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s;
+  const already = new Set();
+  (mapped || []).forEach(sel => {
+    try { document.querySelectorAll(sel).forEach(e => already.add(e)); } catch (e) {}
+  });
+  const isTab = (el) => {
+    const r = (el.getAttribute('role') || '').toLowerCase();
+    if (r === 'tab') return true;
+    if (el.closest && el.closest('[role=tablist]')) return true;
+    if (el.hasAttribute('data-radix-collection-item') && r !== 'combobox' &&
+        r !== 'listbox') return true;
+    return false;
+  };
+  const labelOf = (el) => {
+    const al = el.getAttribute('aria-label'); if (al && al.trim()) return al.trim();
+    const lb = el.getAttribute('aria-labelledby');
+    if (lb) { const t = document.getElementById(lb); if (t && t.textContent.trim())
+              return t.textContent.trim(); }
+    if (el.id) { const l = document.querySelector('label[for="' + esc(el.id) + '"]');
+                 if (l && l.textContent.trim()) return l.textContent.trim(); }
+    let g = el.closest ? el.closest('div,fieldset,label') : null;
+    for (let i = 0; i < 3 && g; i++) {
+      const l = g.querySelector('label');
+      if (l && l.textContent.trim()) return l.textContent.trim();
+      g = g.parentElement;
+    }
+    const t = (el.textContent || '').trim();
+    return (t ? t.slice(0, 40) : (el.getAttribute('name') || el.tagName.toLowerCase()));
+  };
+  const stamp = (el) => {
+    let s = el.getAttribute('data-sysintel-choice');
+    if (!s) { s = 'c' + (n++); el.setAttribute('data-sysintel-choice', s); }
+    return '[data-sysintel-choice="' + s + '"]';
+  };
+  const push = (el, kind) => {
+    if (!el || seen.has(el) || already.has(el) || isTab(el)) return;
+    seen.add(el);
+    out.push({ selector: stamp(el), kind, label: labelOf(el),
+               role: (el.getAttribute('role') || '').toLowerCase(),
+               tag: el.tagName.toLowerCase(),
+               haspopup: (el.getAttribute('aria-haspopup') || '').toLowerCase() });
+  };
+  document.querySelectorAll('select').forEach(el => push(el, 'select'));
+  document.querySelectorAll('[role=combobox],[role=listbox]').forEach(el => push(el, 'combobox'));
+  document.querySelectorAll('[aria-haspopup=listbox],[aria-haspopup=menu]')
+    .forEach(el => { if ((el.getAttribute('role') || '').toLowerCase() !== 'combobox')
+                       push(el, 'combobox'); });
+  // native radio groups → one entry per group name (selector targets the group)
+  const byName = {};
+  document.querySelectorAll('input[type=radio]').forEach(el => {
+    const nm = el.getAttribute('name') || '';
+    (byName[nm] = byName[nm] || []).push(el);
+  });
+  Object.keys(byName).forEach(nm => {
+    if (!nm) return;
+    const first = byName[nm][0];
+    if (seen.has(first) || already.has(first)) return;
+    seen.add(first);
+    out.push({ selector: 'input[type=radio][name="' + nm + '"]', kind: 'radio',
+               label: nm, role: 'radio', tag: 'input', haspopup: '' });
+  });
+  document.querySelectorAll('[role=radiogroup]').forEach(el => push(el, 'radio'));
+  return out;
+}
 """
 
 # Force a value onto a native <select> via JS and report whether it STUCK
@@ -190,14 +310,32 @@ def detect_choice_control(page, selector: str) -> Dict[str, Any]:
     Returns {kind, options, values, required, editable, multiple}:
       • kind "select"   — native <select>; `options` are option labels, `values`
                           the non-empty option values.
-      • kind "combobox" — custom shadcn/Radix combobox; opened, its visible
-                          [role=option] labels read, then closed (Escape).
-                          `editable` true when the trigger is a text <input>.
+      • kind "combobox" — custom shadcn/Radix combobox (a <button role=combobox>
+                          or [role=listbox]/[aria-haspopup=listbox] trigger);
+                          opened, its visible [role=option]/[cmdk-item] labels are
+                          read, then it is closed (Escape). `editable` is true when
+                          the open popup exposes a free-text SEARCH input (cmdk /
+                          command-palette style) or the trigger itself is an <input>.
+      • kind "radio"    — a native radio group or [role=radiogroup]; `options`/
+                          `values` are the radio option values/labels.
       • kind "none"     — not a choice control (text/number/email/etc.).
     Duck-typed on Playwright `page` (.evaluate / .locator / .keyboard).
     """
     empty = {"kind": "none", "options": [], "values": [],
              "required": False, "editable": False, "multiple": False}
+
+    # native radio group (selector like input[type=radio][name="x"] or a
+    # [role=radiogroup]) — enumerate the option values/labels directly.
+    try:
+        rinfo = page.evaluate(_RADIO_DETECT_JS, selector)
+    except Exception:
+        rinfo = None
+    if rinfo and rinfo.get("found") and rinfo.get("kind") == "radio":
+        return {"kind": "radio", "options": rinfo.get("labels") or [],
+                "values": rinfo.get("values") or [],
+                "required": bool(rinfo.get("required")), "editable": False,
+                "multiple": False}
+
     try:
         info = page.evaluate(_CHOICE_DETECT_JS, selector)
     except Exception:
@@ -215,20 +353,82 @@ def detect_choice_control(page, selector: str) -> Dict[str, Any]:
 
     if info.get("kind") == "combobox":
         options: List[str] = []
+        editable = bool(info.get("editable"))
         try:
-            page.locator(selector).first.click(timeout=1500)
-            page.wait_for_timeout(120)
-            options = page.evaluate(_LISTBOX_OPTIONS_JS) or []
+            # defensively close any popup left open from a prior control
             try: page.keyboard.press("Escape")
             except Exception: pass
-            page.wait_for_timeout(60)
+            page.locator(selector).first.click(timeout=1500)
+            page.wait_for_timeout(160)
+            options = page.evaluate(_LISTBOX_OPTIONS_JS) or []
+            # a visible search box inside the open popup ⇒ editable combobox
+            try:
+                if page.evaluate(_OPEN_SEARCH_INPUT_JS).get("found"):
+                    editable = True
+            except Exception:
+                pass
+            try: page.keyboard.press("Escape")
+            except Exception: pass
+            page.wait_for_timeout(80)
         except Exception:
             pass
         return {"kind": "combobox", "options": options, "values": list(options),
                 "required": bool(info.get("required")),
-                "editable": bool(info.get("editable")), "multiple": False}
+                "editable": editable, "multiple": False}
 
     return dict(empty)
+
+
+# Enumerate a native radio group's option values/labels for a group selector.
+_RADIO_DETECT_JS = r"""
+(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return {found:false};
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  if (el.tagName.toLowerCase() === 'input' &&
+      (el.getAttribute('type') || '').toLowerCase() === 'radio') {
+    const nm = el.getAttribute('name') || '';
+    const group = nm ? Array.prototype.slice.call(
+        document.querySelectorAll('input[type=radio][name="' + nm + '"]')) : [el];
+    return {found:true, kind:'radio',
+            values: group.map(r => r.value).filter(v => v !== ''),
+            labels: group.map(r => {
+              if (r.id) { const l = document.querySelector('label[for="' + r.id + '"]');
+                          if (l && l.textContent.trim()) return l.textContent.trim(); }
+              const p = r.closest('label'); return p ? p.textContent.trim() : (r.value || '');
+            }).filter(Boolean),
+            required: group.some(r => r.required)};
+  }
+  if (role === 'radiogroup') {
+    const radios = Array.prototype.slice.call(el.querySelectorAll('[role=radio]'));
+    return {found:true, kind:'radio',
+            values: radios.map(r => r.getAttribute('value') ||
+                                    (r.textContent || '').trim()).filter(Boolean),
+            labels: radios.map(r => (r.getAttribute('aria-label') ||
+                                     r.textContent || '').trim()).filter(Boolean),
+            required: el.getAttribute('aria-required') === 'true'};
+  }
+  return {found:false};
+}
+"""
+
+
+def discover_choice_controls(page, mapped_selectors: Optional[List[str]] = None
+                             ) -> List[Dict[str, Any]]:
+    """Scan the LIVE page for EVERY choice control, independent of the field map.
+
+    Returns [{selector, kind, label, role, tag, haspopup}] with a stable stamped
+    selector per control. `mapped_selectors` are already-mapped field selectors
+    whose elements are skipped (so the text battery keeps sole ownership of them).
+    This is the fix for enum firing 0 cases: shadcn/Radix comboboxes render as
+    <button role=combobox>, which the <input>/<select>/<textarea>-only field
+    mapper never sees. Tab triggers are excluded (navigation, not choices).
+    """
+    try:
+        found = page.evaluate(_DISCOVER_CHOICE_JS, list(mapped_selectors or []))
+    except Exception:
+        return []
+    return found or []
 
 
 # a token no correctly-domained control should ever hold or offer
@@ -253,14 +453,27 @@ def enum_browser_cases(page, name: str, selector: str, control: Dict[str, Any],
     """
     recs: List[Dict[str, Any]] = []
 
-    def rec(case, status, signal, value=""):
+    def rec(case, status, signal, value="", expect="reject"):
         recs.append({"field": name, "case": case, "method": "enum",
-                     "expect": "reject", "value": str(value)[:24],
+                     "expect": expect, "value": str(value)[:24],
                      "status": status, "signal": signal})
 
     kind = control.get("kind")
 
     if kind == "select":
+        values = control.get("values") or []
+        # (0) IN-DOMAIN: a legal option must be ACCEPTED (no field-level error).
+        if values:
+            try:
+                page.evaluate(_SET_SELECT_VALUE_JS, {"sel": selector, "value": values[0]})
+            except Exception:
+                pass
+            obs, blocked = submit_and_observe(selector)
+            err = bool(obs.get("native") or obs.get("aria") or obs.get("err"))
+            rec("enum_in_domain", "PASS" if not err else "FAIL",
+                _signal_of(obs, blocked), values[0], expect="accept")
+            restore_valid()
+
         # (1) OUT-OF-DOMAIN: try to force a bogus string onto the <select>.
         try:
             r = page.evaluate(_SET_SELECT_VALUE_JS, {"sel": selector, "value": _OUT_OF_DOMAIN})
@@ -293,27 +506,100 @@ def enum_browser_cases(page, name: str, selector: str, control: Dict[str, Any],
 
     elif kind == "combobox":
         options = control.get("options") or []
-        # (1) STRUCTURAL: the enumerated domain must not offer an out-of-domain entry.
-        rec("enum_domain_closed",
-            "PASS" if _OUT_OF_DOMAIN not in options else "FAIL",
-            f"options={len(options)}; out-of-domain not offered", _OUT_OF_DOMAIN)
-        # (2) EDITABLE combobox: type an out-of-domain string and submit.
+        # (0) IN-DOMAIN: pick a real option (via restore_valid, which clicks the
+        #     first listed option) and submit — a legal choice must be ACCEPTED.
+        if options:
+            restore_valid()
+            obs, blocked = submit_and_observe(selector)
+            err = bool(obs.get("native") or obs.get("aria") or obs.get("err"))
+            rec("enum_in_domain", "PASS" if not err else "FAIL",
+                _signal_of(obs, blocked), options[0], expect="accept")
+            restore_valid()
+
+        # (1) STRUCTURAL: the enumerated domain must not itself offer an
+        #     out-of-domain entry. Guard the empty case honestly — an unread
+        #     domain is a SKIP, not a free PASS.
+        if not options:
+            rec("enum_domain_closed", "SKIP",
+                "could not read this combobox's option domain (popup did not open "
+                "or exposed no [role=option]/[cmdk-item])", _OUT_OF_DOMAIN)
+        else:
+            rec("enum_domain_closed",
+                "PASS" if _OUT_OF_DOMAIN not in options else "FAIL",
+                f"options={len(options)}; out-of-domain not offered", _OUT_OF_DOMAIN)
+
+        # (2) OUT-OF-DOMAIN attempt.
         if control.get("editable"):
+            # cmdk / searchable combobox: type the out-of-domain string and see
+            # whether the popup offers any way to COMMIT it (a create/add
+            # affordance, or a filtered-in option). If nothing matches, the
+            # domain is enforced → rejected (PASS). A create/add affordance means
+            # the field is free-text by design → honest SKIP, not a false FAIL.
+            committable = None
             try:
-                page.locator(selector).first.fill(_OUT_OF_DOMAIN, timeout=1500)
-                obs, blocked = submit_and_observe(selector)
-                rejected = bool(obs.get("native") or obs.get("aria") or obs.get("err")) or blocked
-                rec("enum_editable_out_of_domain", "PASS" if rejected else "FAIL",
-                    _signal_of(obs, blocked), _OUT_OF_DOMAIN)
+                try: page.keyboard.press("Escape")
+                except Exception: pass
+                page.locator(selector).first.click(timeout=1500)
+                page.wait_for_timeout(140)
+                typed = page.evaluate(_TYPE_IN_OPEN_SEARCH_JS, _OUT_OF_DOMAIN)
+                if typed and typed.get("found"):
+                    page.wait_for_timeout(160)
+                    left = page.evaluate(_LISTBOX_OPTIONS_JS) or []
+                    import re as _re
+                    creatable = [o for o in left
+                                 if _re.search(r"creat|add|new|\"?" +
+                                               _re.escape(_OUT_OF_DOMAIN), o, _re.I)]
+                    committable = bool(creatable)
+                    signal = (f"create-affordance:{creatable[0][:40]}" if creatable
+                              else f"no committable option (options left={len(left)})")
+                else:
+                    # editable per trigger but no open search box — fall back to
+                    # filling the trigger directly.
+                    try:
+                        page.locator(selector).first.fill(_OUT_OF_DOMAIN, timeout=1200)
+                    except Exception:
+                        pass
+                    obs, blocked = submit_and_observe(selector)
+                    committable = not (bool(obs.get("native") or obs.get("aria")
+                                            or obs.get("err")) or blocked)
+                    signal = _signal_of(obs, blocked)
+                try: page.keyboard.press("Escape")
+                except Exception: pass
             except Exception as e:
                 rec("enum_editable_out_of_domain", "SKIP", f"err:{type(e).__name__}",
                     _OUT_OF_DOMAIN)
+                committable = "skip"
+            if committable is True:
+                rec("enum_editable_out_of_domain", "SKIP",
+                    "combobox is creatable/free-text (accepts new values by design) — "
+                    "out-of-domain not an enum violation", _OUT_OF_DOMAIN)
+            elif committable is False:
+                rec("enum_editable_out_of_domain", "PASS", signal, _OUT_OF_DOMAIN)
             restore_valid()
         else:
             # select-only widget: out-of-domain cannot be entered at all.
-            rec("enum_editable_out_of_domain", "SKIP",
+            rec("enum_out_of_domain", "SKIP",
                 "combobox only allows selecting from its own list — "
                 "out-of-domain structurally impossible")
+
+    elif kind == "radio":
+        values = control.get("values") or control.get("options") or []
+        # (0) IN-DOMAIN: selecting a real radio must be accepted.
+        if values:
+            restore_valid()
+            obs, blocked = submit_and_observe(selector)
+            err = bool(obs.get("native") or obs.get("aria") or obs.get("err"))
+            rec("enum_in_domain", "PASS" if not err else "FAIL",
+                _signal_of(obs, blocked), values[0], expect="accept")
+            restore_valid()
+        # (1) STRUCTURAL: a native radio group can only ever hold one of its own
+        #     options — out-of-domain is not representable in the UI at all.
+        rec("enum_domain_closed",
+            "PASS" if _OUT_OF_DOMAIN not in values else "FAIL",
+            f"radio options={len(values)}; out-of-domain not offered", _OUT_OF_DOMAIN)
+        rec("enum_out_of_domain", "SKIP",
+            "radio group can only hold one of its own options — "
+            "out-of-domain structurally impossible")
 
     return recs
 
@@ -350,35 +636,70 @@ def run_browser_field_validation(page, route: str, base_url: str,
     except Exception: pass
 
     results: List[Dict[str, Any]] = []
+    # Merged selector map: the caller's mapped text fields PLUS choice controls we
+    # discover directly from the DOM (below). field_selectors is never mutated.
+    selectors: Dict[str, str] = dict(field_selectors)
     names = list(field_selectors.keys())
     if max_fields:
         names = names[:max_fields]
 
-    # Detect choice controls ONCE so enum fields join the valid baseline with a
-    # real option (they can't be text-filled) and get the enum method below.
+    # Detect choice controls among the MAPPED fields ONCE so enum fields join the
+    # valid baseline with a real option (they can't be text-filled) and get the
+    # enum method below.
     controls: Dict[str, Dict[str, Any]] = {}
     for nm in names:
         try:
-            ci = detect_choice_control(page, field_selectors[nm])
+            ci = detect_choice_control(page, selectors[nm])
         except Exception:
             ci = {"kind": "none"}
-        if ci.get("kind") in ("select", "combobox"):
+        if ci.get("kind") in ("select", "combobox", "radio"):
             controls[nm] = ci
+
+    # DISCOVER choice controls the field mapper cannot see: shadcn/Radix
+    # comboboxes render as <button role=combobox> (not <input>/<select>), so they
+    # never reach field_selectors — the reason the enum method used to fire 0
+    # cases. Each discovered control gets a stamped selector and a synthetic name;
+    # tab triggers are excluded by the discovery JS.
+    discovered_meta: List[Dict[str, Any]] = []
+    try:
+        discovered_meta = discover_choice_controls(page, list(field_selectors.values()))
+    except Exception:
+        discovered_meta = []
+    for d in discovered_meta:
+        dsel = d.get("selector")
+        if not dsel:
+            continue
+        try:
+            ci = detect_choice_control(page, dsel)
+        except Exception:
+            ci = {"kind": "none"}
+        if ci.get("kind") not in ("select", "combobox", "radio"):
+            continue
+        label = (d.get("label") or ci.get("kind") or "choice").strip()
+        base = f"choice::{label}"[:56]
+        nm = base
+        k = 1
+        while nm in selectors:
+            nm = f"{base}#{k}"; k += 1
+        selectors[nm] = dsel
+        controls[nm] = ci
+        names.append(nm)
 
     def _valid_of(nm):
         return _valid_ui_value(meta_by_name.get(nm, {"name": nm}))
 
     def _fill(nm, value):
         try:
-            page.locator(field_selectors[nm]).first.fill(value, timeout=2000)
+            page.locator(selectors[nm]).first.fill(value, timeout=2000)
             return True
         except Exception:
             return False
 
     def _select_valid(nm):
-        """Put a choice control onto a real, valid option (for baseline / restore)."""
+        """Put a choice control onto a real, valid option (for baseline / restore).
+        Returns True when a valid selection was made."""
         ctl = controls.get(nm)
-        sel = field_selectors[nm]
+        sel = selectors[nm]
         if not ctl:
             return False
         if ctl["kind"] == "select":
@@ -394,13 +715,30 @@ def run_browser_field_validation(page, route: str, base_url: str,
                     return True
                 except Exception:
                     return False
-        # combobox: open and click its first real option
+        if ctl["kind"] == "radio":
+            # click the first radio in the group (or first [role=radio])
+            try:
+                r = page.locator(sel).first
+                if r.count() > 0:
+                    r.check(timeout=1200) if sel.startswith("input") else r.click(timeout=1200)
+                    return True
+            except Exception:
+                try:
+                    page.locator(sel + " [role=radio]").first.click(timeout=1200)
+                    return True
+                except Exception:
+                    pass
+            return False
+        # combobox: open and click its first real option ([role=option]/[cmdk-item])
         try:
+            try: page.keyboard.press("Escape")
+            except Exception: pass
             page.locator(sel).first.click(timeout=1500)
-            page.wait_for_timeout(100)
-            opt = page.locator("[role=option]").first
+            page.wait_for_timeout(140)
+            opt = page.locator("[role=option],[cmdk-item]").first
             if opt.count() > 0:
                 opt.click(timeout=1500)
+                page.wait_for_timeout(60)
                 return True
             try: page.keyboard.press("Escape")
             except Exception: pass
@@ -443,8 +781,16 @@ def run_browser_field_validation(page, route: str, base_url: str,
 
     _fill_baseline()
 
+    # HONESTY: if this form genuinely exposes no choice control, say so once —
+    # never silently omit the enum method.
+    if not controls:
+        results.append({"field": "(form)", "case": "enum_no_choice_control",
+                        "method": "enum", "expect": "n/a", "value": "",
+                        "status": "SKIP",
+                        "signal": f"no <select>/combobox/radio detected on {route}"})
+
     for name in names:
-        sel = field_selectors[name]
+        sel = selectors[name]
         meta = meta_by_name.get(name, {"name": name})
         # Choice control → the ENUM (dropdown-domain) method, not the text battery
         # (a <select>/combobox can't be text-filled). Additive; text/number/email
@@ -493,8 +839,11 @@ def run_browser_field_validation(page, route: str, base_url: str,
     passed = sum(1 for r in results if r["status"] == "PASS")
     failed = sum(1 for r in results if r["status"] == "FAIL")
     skipped = sum(1 for r in results if r["status"] == "SKIP")
+    enum_results = [r for r in results if r.get("method") == "enum"]
     return {"route": route, "fieldsTested": len(names), "cases": len(results),
-            "passed": passed, "failed": failed, "skipped": skipped, "results": results}
+            "passed": passed, "failed": failed, "skipped": skipped,
+            "choiceControls": len(controls), "enumCases": len(enum_results),
+            "results": results}
 
 
 if __name__ == "__main__":
@@ -530,7 +879,33 @@ if __name__ == "__main__":
              <option value="a">A</option>
              <option value="b">B</option>
            </select></div>
+      <!-- a shadcn/Radix-style custom combobox: a button[role=combobox] whose
+           popup is a [role=listbox] of [role=option]s (the shape the field mapper
+           can NOT see, since it is not <input>/<select>/<textarea>). Opening is
+           idempotent and Escape/option-click close it, so detect/restore cycles
+           stay deterministic. -->
+      <div>
+        <button type="button" role="combobox" id="cb" aria-expanded="false"
+          onclick="document.getElementById('lb').style.display='block';">Pick one</button>
+        <div id="lb" role="listbox" style="display:none">
+          <div role="option" onclick="document.getElementById('cb').textContent=this.textContent;document.getElementById('lb').style.display='none';">Red</div>
+          <div role="option">Green</div>
+          <div role="option">Blue</div>
+        </div>
+      </div>
+      <!-- a native radio group -->
+      <fieldset id="rg">
+        <label><input type="radio" name="color" value="r">Rouge</label>
+        <label><input type="radio" name="color" value="g">Vert</label>
+      </fieldset>
       <button type="submit">Save</button>
+      <script>
+        document.addEventListener('keydown', function(e){
+          if (e.key === 'Escape') {
+            var l = document.getElementById('lb'); if (l) l.style.display = 'none';
+          }
+        });
+      </script>
     </form>"""
     with sync_playwright() as p:
         import os as _os
@@ -580,11 +955,52 @@ if __name__ == "__main__":
                                   lambda: pg.evaluate(_SET_SELECT_VALUE_JS,
                                                       {"sel": "#choice", "value": "a"}))
         by = {rr["case"]: rr["status"] for rr in recs}
+        # in-domain (a legal option) is ACCEPTED → PASS
+        assert by.get("enum_in_domain") == "PASS", recs
         # out-of-domain can't stick on a native <select> → honest SKIP (never PASS)
         assert by.get("enum_out_of_domain") == "SKIP", recs
         # required-empty select IS caught (native invalid / blocked) → PASS
         assert by.get("enum_required_empty") == "PASS", recs
+
+        # ── DISCOVERY: choice controls the field mapper never sees ──
+        disc = discover_choice_controls(pg, [])
+        kinds = sorted({d["kind"] for d in disc})
+        # native <select>, custom [role=combobox], and the native radio group
+        assert "select" in kinds and "combobox" in kinds and "radio" in kinds, disc
+        cb = next(d for d in disc if d["kind"] == "combobox")
+        rd = next(d for d in disc if d["kind"] == "radio")
+
+        # ── custom combobox: detect + enumerate its option domain ──
+        cbctl = detect_choice_control(pg, cb["selector"])
+        assert cbctl["kind"] == "combobox", cbctl
+        assert cbctl["options"] == ["Red", "Green", "Blue"], cbctl   # domain read
+        def _cb_restore():
+            try:
+                pg.locator(cb["selector"]).first.click(timeout=800)
+                pg.wait_for_timeout(60)
+                o = pg.locator("[role=option]").first
+                if o.count() > 0: o.click(timeout=800)
+            except Exception: pass
+            return True
+        cbrecs = enum_browser_cases(pg, "cb", cb["selector"], cbctl, _sao, _cb_restore)
+        cbby = {rr["case"]: rr["status"] for rr in cbrecs}
+        assert cbby.get("enum_in_domain") == "PASS", cbrecs      # legal option accepted
+        assert cbby.get("enum_domain_closed") == "PASS", cbrecs  # out-of-domain not offered
+        # select-only (no search input) → out-of-domain is structurally impossible
+        assert cbby.get("enum_out_of_domain") == "SKIP", cbrecs
+
+        # ── native radio group: detect + enum ──
+        rdctl = detect_choice_control(pg, rd["selector"])
+        assert rdctl["kind"] == "radio", rdctl
+        assert rdctl["values"] == ["r", "g"], rdctl
+        rdrecs = enum_browser_cases(pg, "color", rd["selector"], rdctl, _sao,
+                                    lambda: (pg.locator(rd["selector"]).first.check(), True)[1])
+        rdby = {rr["case"]: rr["status"] for rr in rdrecs}
+        assert rdby.get("enum_domain_closed") == "PASS", rdrecs
+        assert rdby.get("enum_out_of_domain") == "SKIP", rdrecs
         b.close()
     print("[live] native-validity detector: bad email✗ / valid✓ / empty-required✗ — correct")
-    print("[live] enum method: out-of-domain SKIP(honest) / required-empty PASS — correct")
+    print("[live] enum method: in-domain PASS / out-of-domain SKIP(honest) / required-empty PASS")
+    print("[live] discovery: native select + role=combobox + radio group all found;")
+    print("       combobox domain enumerated [Red,Green,Blue], radio domain [r,g] — correct")
     print("SELF-TEST PASS")
