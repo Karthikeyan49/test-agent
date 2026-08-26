@@ -365,9 +365,15 @@ class MutationTester:
 
     # ---- legacy single-file / explicit-file runner ------------------------
     def run(self, files: List[str], run_tests: Callable[[], Tuple[int, int]],
-            max_mutants_per_file: int = 10) -> Dict[str, Any]:
+            max_mutants_per_file: int = 10,
+            on_mutant: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Score a fixed list of files, up to `max_mutants_per_file` each. Kept for
-        back-compat; `execute_catalog` is the repo-wide, budgeted entry point."""
+        back-compat; `execute_catalog` is the repo-wide, budgeted entry point.
+
+        `on_mutant`, if given, is called once per executed mutant (killed AND
+        survived) with {file,lineno,op,original,mutant,verdict,ms} — same contract
+        as execute_catalog — so single-file runs can also stream to a live ledger."""
+        import time as _time
         recovered = self._recover_orphans(files)
         if recovered:
             print(f"[mutation] recovered {len(recovered)} source file(s) from a "
@@ -385,16 +391,29 @@ class MutationTester:
                 nonlocal tried, killed, survived
                 for mut in generate_mutants(original, max_mutants_per_file):
                     tried += 1
+                    _mt0 = _time.time()
                     try:
                         self._write(path, mut["mutated_source"])
                         _p, mut_failed = run_tests()
-                        if mut_failed > base_failed:
+                        _verdict = "killed" if mut_failed > base_failed else "survived"
+                        if _verdict == "killed":
                             killed += 1
                         else:
                             survived += 1
                             if len(surviving_samples) < 10:
                                 surviving_samples.append(
                                     {"file": path, "lineno": mut["lineno"], "op": mut["op"]})
+                        if on_mutant is not None:
+                            try:
+                                on_mutant({
+                                    "file": path, "lineno": mut["lineno"], "op": mut["op"],
+                                    "original": (mut.get("original_line") or "").strip(),
+                                    "mutant": (mut.get("mutated_line") or "").strip(),
+                                    "verdict": _verdict,
+                                    "ms": round((_time.time() - _mt0) * 1000),
+                                })
+                            except Exception:
+                                pass
                     finally:
                         self._write(path, original)   # ALWAYS restore (in-memory)
 
@@ -415,7 +434,8 @@ class MutationTester:
     def execute_catalog(self, catalog: List[Dict[str, Any]],
                         run_tests: Callable[[], Tuple[int, int]],
                         budget: int = 200, per_file_cap: int = 0,
-                        time_budget_seconds: float = 0, seed: int = 1337) -> Dict[str, Any]:
+                        time_budget_seconds: float = 0, seed: int = 1337,
+                        on_mutant: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Execute a representative sample of a discovered catalog and score it.
 
         Honesty guarantees:
@@ -427,7 +447,12 @@ class MutationTester:
         Bounds: `budget` (max mutants to run), `per_file_cap` (max per file), and
         `time_budget_seconds` (soft wall-clock cap: the sample is pre-trimmed to the
         estimate AND execution stops early once the deadline passes). Sampling is
-        deterministic via `seed`."""
+        deterministic via `seed`.
+
+        `on_mutant`, if given, is called once per executed mutant with a per-mutant
+        record {file,lineno,op,original,mutant,verdict,ms} — killed AND survived —
+        so a caller can stream every result to a live ledger. Additive: it never
+        changes scoring or the returned shape."""
         import os, time
         discovered = len(catalog)
         picks = sample_catalog(catalog, budget, per_file_cap, seed)
@@ -487,10 +512,12 @@ class MutationTester:
                         # Source drifted since discovery — skip rather than misapply.
                         continue
                     tried += 1
+                    _mt0 = time.time()
                     try:
                         self._write(_path, mutated)
                         _p, mut_failed = run_tests()
-                        if mut_failed > base_failed:
+                        _verdict = "killed" if mut_failed > base_failed else "survived"
+                        if _verdict == "killed":
                             killed += 1
                         else:
                             survived += 1
@@ -500,6 +527,17 @@ class MutationTester:
                                     "original": mut["original_line"].strip(),
                                     "mutant": mut["mutated_line"].strip(),
                                 })
+                        if on_mutant is not None:
+                            try:
+                                on_mutant({
+                                    "file": _path, "lineno": ln, "op": mut["op"],
+                                    "original": mut["original_line"].strip(),
+                                    "mutant": mut["mutated_line"].strip(),
+                                    "verdict": _verdict,
+                                    "ms": round((time.time() - _mt0) * 1000),
+                                })
+                            except Exception:
+                                pass   # a ledger hiccup must never abort the run
                     finally:
                         self._write(_path, original)   # ALWAYS restore (in-memory)
 

@@ -338,19 +338,31 @@ def _build_auth(args, base_url):
 
 def _controller_tokens(file_path):
     """Resource tokens implied by a controller file name, e.g.
-    ProductController.php -> {'product', 'products'} (+ camelCase split)."""
+    ProductController.php -> {'product', 'products'} (+ camelCase split).
+
+    Generic area/prefix words (e.g. 'admin') are treated as stopwords: an
+    AdminInvoiceController serves the *invoice* resource, not every /admin/*
+    endpoint, so scoping on 'admin' would wrongly pull in the whole admin area
+    (hundreds of endpoints) and make each mutant re-run the near-full suite. We
+    scope on the specific resource instead, falling back to the generic words
+    only if nothing specific remains."""
     import re as _re
+    _STOP = {"admin", "api", "base", "abstract"}
     base = os.path.basename(file_path)
     base = _re.sub(r'\.php$', '', base, flags=_re.IGNORECASE)
     base = _re.sub(r'Controller$', '', base)
     words = [w.lower() for w in _re.findall(r'[A-Z]?[a-z0-9]+', base) if w]
-    toks = set()
-    for w in words:
-        if len(w) < 3:
-            continue
-        toks.add(w)
-        toks.add(w + 's')
-        toks.add(w.rstrip('s'))
+
+    def _build(ws):
+        t = set()
+        for w in ws:
+            if len(w) < 3:
+                continue
+            t.add(w); t.add(w + 's'); t.add(w.rstrip('s'))
+        return t
+
+    specific = _build([w for w in words if w not in _STOP])
+    toks = specific if specific else _build(words)   # keep generic only if nothing else
     return toks, base
 
 
@@ -504,9 +516,14 @@ def run_mutation_mode(args, test_cases):
     reset_url = getattr(args, 'mutate_reset_url', None) or (base_url.rstrip('/') + "/clear-cache.php")
     _reset_ok = [True]  # track whether the reset hook works (avoids repeated slow fallbacks)
 
+    # Build a proxy-bypassing opener: the reset target is always the local app, and
+    # in sandboxed environments a configured HTTP(S)_PROXY would otherwise capture
+    # the localhost request and fail it — forcing the slow timed fallback every run.
+    _noproxy_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
     def _reset_server_cache():
         try:
-            with urllib.request.urlopen(reset_url, timeout=5) as r:
+            with _noproxy_opener.open(reset_url, timeout=5) as r:
                 r.read()
             return True
         except Exception:
@@ -537,6 +554,29 @@ def run_mutation_mode(args, test_cases):
     print(f"{BOLD}[i] Discovered {_census['discovered']} mutant(s) across "
           f"{_census['files']} file(s){RESET} {DIM}by operator {_census['byOperator']}{RESET}")
 
+    # Optional per-mutant JSONL ledger: one flushed row per mutant (killed AND
+    # survived) the moment it runs, for a live/unified test ledger. Works for BOTH
+    # the repo-wide (execute_catalog) and single-file (run) paths.
+    _mut_led = None
+    _on_mutant = None
+    if getattr(args, 'mutation_ledger', None):
+        os.makedirs(os.path.dirname(os.path.abspath(args.mutation_ledger)) or ".", exist_ok=True)
+        _mut_led = open(args.mutation_ledger, "a", encoding="utf-8")
+        _mut_n = [0]
+        def _on_mutant(rec, _f=_mut_led, _n=_mut_n):
+            _n[0] += 1
+            rel = os.path.relpath(rec["file"]) if os.path.exists(rec["file"]) else rec["file"]
+            _f.write(json.dumps({
+                "ts": time.time(), "id": f"MUT-{_n[0]:05d}", "cat": "Mutation",
+                "layer": "MUT", "m": rec["op"], "ep": f"{rel}:{rec['lineno']}",
+                "exp": "killed", "act": rec["verdict"],
+                "v": "PASS" if rec["verdict"] == "killed" else "FAIL",
+                "r": f"{rec.get('original','')} -> {rec.get('mutant','')}", "ms": rec.get("ms", 0),
+            }, ensure_ascii=False) + "\n")
+            _f.flush()
+            try: os.fsync(_f.fileno())
+            except Exception: pass
+
     print(f"{DIM}Running baseline (clean source)…{RESET}")
     if repo_mode:
         print(f"{CYAN}[+] Executing a bounded sample: budget={args.mutate_budget} "
@@ -544,11 +584,16 @@ def run_mutation_mode(args, test_cases):
         result = MutationTester().execute_catalog(
             catalog, run_tests, budget=args.mutate_budget,
             per_file_cap=getattr(args, 'mutate_per_file_cap', 0),
-            time_budget_seconds=getattr(args, 'mutate_time_budget', 0))
+            time_budget_seconds=getattr(args, 'mutate_time_budget', 0),
+            on_mutant=_on_mutant)
         # normalize execute_catalog's shape to the printer below
         result.setdefault("mutantsTried", result.get("executed", 0))
     else:
-        result = MutationTester().run(files, run_tests, max_mutants_per_file=args.mutate_max)
+        result = MutationTester().run(files, run_tests,
+                                      max_mutants_per_file=args.mutate_max,
+                                      on_mutant=_on_mutant)
+    if _mut_led is not None:
+        _mut_led.close()
 
     if result.get("error"):
         print(f"{RED}[✗] {result['error']}{RESET}")
@@ -1824,6 +1869,7 @@ Examples:
     tp.add_argument("--mutate-budget", type=int, default=50, help="Repo-wide mutation: max mutants to actually execute from the discovered catalog (default: 50). Each executed mutant re-runs the whole suite, so this bounds wall-clock time.")
     tp.add_argument("--mutate-per-file-cap", type=int, default=0, help="Repo-wide mutation: cap mutants executed per file so one huge file can't dominate the sample (0 = no cap).")
     tp.add_argument("--mutate-time-budget", type=float, default=0, help="Repo-wide mutation: soft wall-clock cap in seconds (0 = none).")
+    tp.add_argument("--mutation-ledger", help="Repo-wide mutation: append a per-mutant JSONL row (killed AND survived) to this file as each mutant runs — for a live/unified test ledger.")
     tp.add_argument("--mutate-scope", default="auto", help="Which endpoints the mutation suite re-runs per mutant: 'auto' (default) = only the endpoints the mutated file serves (fast, via the graph's controller→endpoint map or a resource-name heuristic); 'all' = every endpoint (slow). A mutant is only catchable by checks that exercise its code, so 'auto' gives the same kills far faster.")
     tp.add_argument("--mutate-reset-url", help="URL to hit between mutants to reset a server-side code cache (default: {base_url}/clear-cache.php; falls back to a timed wait)")
     tp.add_argument("--openapi",      help="Path to an OpenAPI/Swagger spec — derive contract tests (happy path, required-field negatives, documented errors)")
