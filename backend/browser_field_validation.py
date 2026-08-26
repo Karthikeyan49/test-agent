@@ -30,7 +30,7 @@ _NUMERICISH = re.compile(r'(?:^|[_\W])(qty|quantity|amount|price|total|cost|coun
 
 
 def field_value_cases(field: Dict[str, Any], rich: bool = True,
-                      rich_max_per_method: int = 8) -> List[Dict[str, Any]]:
+                      rich_max_per_method: Optional[int] = 8) -> List[Dict[str, Any]]:
     """The per-field frontend value battery. Each case: {case, value, expect}.
 
     rich=True (default) delegates to backend/field_battery.rich_field_cases, so the
@@ -608,7 +608,8 @@ def run_browser_field_validation(page, route: str, base_url: str,
                                  field_selectors: Dict[str, str],
                                  fields_meta: Optional[List[Dict[str, Any]]] = None,
                                  submit_selector: str = 'button[type="submit"]',
-                                 max_fields: int = 0, rich: bool = True) -> Dict[str, Any]:
+                                 max_fields: int = 0, rich: bool = True,
+                                 rich_max_per_method: Optional[int] = 8) -> Dict[str, Any]:
     """
     For a form at `route`, drive every mapped field through its value battery in a
     live browser and record the frontend's reaction. `field_selectors` maps a field
@@ -806,7 +807,7 @@ def run_browser_field_validation(page, route: str, base_url: str,
                                 "signal": f"err:{type(e).__name__}"})
             _select_valid(name)   # leave it valid for the next field's baseline
             continue
-        for c in field_value_cases(meta, rich=rich):
+        for c in field_value_cases(meta, rich=rich, rich_max_per_method=rich_max_per_method):
             rec = {"field": name, "case": c["case"], "method": c.get("method"),
                    "expect": c["expect"], "value": str(c["value"])[:24],
                    "status": "SKIP", "signal": ""}
