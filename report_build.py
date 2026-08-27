@@ -58,7 +58,34 @@ def collect(run_dir):
     return rows, files
 
 
-def build_html(rows):
+def read_notes(run_dir):
+    """Optional 'corrections since last run' sidecar: <dir>/corrections.json.
+
+    Accepts either a list of {"title","body"} objects / bare strings, or an object
+    {"heading": str, "items": [...]}. Returns (heading, [(title, body), ...]) or
+    (None, []) when absent — the builder stays general and data-driven.
+    """
+    path = os.path.join(run_dir, "corrections.json")
+    if not os.path.isfile(path):
+        return None, []
+    try:
+        data = json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return None, []
+    heading, items = "Corrections since last run", data
+    if isinstance(data, dict):
+        heading = data.get("heading", heading)
+        items = data.get("items", [])
+    out = []
+    for it in items or []:
+        if isinstance(it, dict):
+            out.append((it.get("title", ""), it.get("body", "")))
+        else:
+            out.append(("", str(it)))
+    return heading, out
+
+
+def build_html(rows, notes=None):
     fam_ct = Counter(r["fam"] for r in rows)
     v_ct = Counter(r.get("v") for r in rows)
     fams = [f for f in FAM_ORDER if fam_ct.get(f)]
@@ -93,6 +120,16 @@ def build_html(rows):
                        f'{html.escape(f.split(" (")[0])}</span>' for f in fams))
 
     famcls_json = json.dumps(FAM_CLS)
+
+    note_heading, note_items = (notes or (None, []))
+    corrections = ""
+    if note_items:
+        li = "".join(
+            f'<li>{("<strong>" + html.escape(t) + "</strong> — ") if t else ""}'
+            f'{html.escape(b)}</li>' for t, b in note_items)
+        corrections = (f'<section class="corr"><h2>{html.escape(note_heading)}</h2>'
+                       f'<ul>{li}</ul></section>')
+
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SystemIntel Consolidated Report</title>
@@ -117,6 +154,9 @@ h1{{font-size:27px;margin:0 0 4px;letter-spacing:-.02em;font-weight:700}}.lede{{
 .tile .big{{font-family:"IBM Plex Mono",monospace;font-size:24px;font-weight:500;font-variant-numeric:tabular-nums}}
 .tile .sub{{font-size:11px;color:var(--mut);margin-top:5px;display:flex;gap:8px;flex-wrap:wrap;font-variant-numeric:tabular-nums}}
 .dot-ok{{color:var(--ok)}}.dot-bad{{color:var(--bad)}}.dot-warn{{color:var(--warn)}}
+.corr{{background:var(--surface);border:1px solid var(--bd);border-left:4px solid var(--ac);border-radius:12px;padding:14px 18px;margin:0 0 14px}}
+.corr h2{{margin:0 0 8px;font-size:14px;font-weight:700;letter-spacing:-.01em}}
+.corr ul{{margin:0;padding-left:18px;color:var(--mut);font-size:12.5px}}.corr li{{margin:3px 0}}.corr strong{{color:var(--tx);font-weight:600}}
 .bar{{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:18px 0 12px;position:sticky;top:0;background:linear-gradient(var(--ground) 78%,transparent);padding:10px 0 12px;z-index:6}}
 .pill{{border:1px solid var(--bd);background:var(--surface);color:var(--tx);border-radius:999px;padding:5px 13px;font-size:12.5px;cursor:pointer;font-weight:500;display:inline-flex;align-items:center;gap:6px}}
 .pill.on{{background:var(--ac);border-color:var(--ac);color:#fff}}.pill .sw{{width:8px;height:8px;border-radius:2px}}
@@ -138,6 +178,7 @@ a.shot{{display:inline-block;vertical-align:middle;margin-right:7px}}a.shot img{
 <h1>Consolidated Test Report</h1>
 <p class="lede">Every test across every family in one run — {total:,} rows · generated {now}. Filter by family / verdict / category or search.</p>
 <div class="tiles">{tiles}</div>
+{corrections}
 <div class="bar">{pills}<span class="sep"></span>
  <span class="pill on" data-k="v" data-v="ALL">All</span>
  <span class="pill" data-k="v" data-v="PASS">Pass</span>
@@ -198,7 +239,10 @@ def main():
     pdf = a.pdf or os.path.join(a.dir, "consolidated_report.pdf")
     rows, files = collect(a.dir)
     print(f"[report] {len(rows):,} rows from {len(files)} ledger file(s)")
-    page = build_html(rows)
+    notes = read_notes(a.dir)
+    if notes[1]:
+        print(f"[report] corrections note: {len(notes[1])} item(s)")
+    page = build_html(rows, notes)
     open(out, "w", encoding="utf-8").write(page)
     print(f"[report] wrote {out} ({len(page):,} bytes)")
     render_pdf(out, pdf)
