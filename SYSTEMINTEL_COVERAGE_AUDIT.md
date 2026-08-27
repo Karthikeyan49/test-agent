@@ -172,8 +172,22 @@ Three strong capabilities that previously ran only through the `run_all.py` orch
 | 7 | Enum method fired 0 cases — shadcn/Radix `button[role=combobox]` invisible to the input/select field mapper | DOM-independent choice discovery + in/out-of-domain enum cases | `e7f8faf` |
 | 8 | Required method fired 0 cases — React forms set no `required` attribute | New behavioral `browser_required_oracle.py` (submit-empty → observe) | `df9ad89` |
 | 9 | Per-method cap hard-wired at 8 in the browser; combinations pairwise-only | Full corpus (`rich_max_per_method=None`) + exhaustive/t-wise combos | `86879da`, `3ad43f1` |
+| 10 | **Injection oracle false positives** — a payload 5xx was flagged "SQLi" without checking the benign baseline, so endpoints that 5xx for infra reasons (LLM/SMS backend down) were mislabeled; 3 reported SQLi (send-otp, chat×2) were all stable 5xx on a clean baseline | **Baseline-trust guard**: benign probe first; a payload 5xx is a signal only when the baseline was clean, else honest SKIP | `62d69… (this effort)` |
+| 11 | `--security-oracles` injection silently fired **0 probes** on a graph without `requestContracts` | On-the-fly deterministic contract recovery from controller source (locate repo via `--path`, the `--graph` dir, or recorded `repoPath`); a bare `--graph` run recovered 102 | same effort |
+| 12 | **IDOR probes always SKIPped** — substituted `{id}→1` with admin as owner, who owns nothing at id 1 → no 2xx baseline | Resolve each token's own id via `/auth/me`; probe the owner's own record → real PASS/FAIL (e.g. `GET /users/9001/orders` PASS) | same effort |
+| 13 | **Suite revoked its own session** — testing `POST /auth/logout` with the shared `--auth-token` revoked it, 401-ing every later phase (scenarios FAIL 49, IDOR SKIP) | `HTTPRunner(protect_session=…)` SKIPs logout/revoke to preserve the token; scenario PASS 1→7, 401 cascade gone | same effort |
+| 14 | Scenario contract fields with generic-text type got literal `"Test<name>"` (e.g. `expense_date`→`"Testexpens"`) → 422 | Name-aware `realistic_value` fallback for unruled contract text (real date/id/url/amount by name) | same effort |
 
-All 7 commits pushed to `claude/new-session-bve7yu`; 32/32 self-tests green.
+All commits pushed to `claude/new-session-bve7yu`; 40/40 self-tests green.
+
+**Scenario-grounding frontier (open, scoped):** after the session-preservation and
+name-aware fixes, the residual scenario failures are genuine — 422/400 from **enum
+fields** (e.g. `product_type`, `payment_mode`) needing real enum members and **FK
+fields** (`vendor`, `*_id`) needing references to existing rows, plus 404s
+downstream of those failed creates. Closing these needs live-data-aware body
+building (DB enum columns + real FK ids at generation time) — a defined follow-up,
+not a point fix. The mutation kill-rate (~5.6%) is a related generation-strength
+item (stronger content/row-count oracles) in the same follow-up.
 
 ---
 
