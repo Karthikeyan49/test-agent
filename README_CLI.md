@@ -1,8 +1,11 @@
 # SystemIntel Platform — CLI Reference
 
-SystemIntel runs entirely via the command line (`cli.py`) or the optional REST API
-(`backend/main.py`). See the root `README.md` for install and quickstart. There is
-no web UI — the CLI/backend is the one canonical surface.
+SystemIntel runs entirely via the command line (`cli.py`). An optional REST API
+(`backend/main.py`) exposes the same scan/graph engine over HTTP, but the CLI does
+**not** use it and does not require its web dependencies. The optional server needs
+`pip install fastapi pydantic uvicorn` and is launched with `python3 backend/main.py`
+(binds to `127.0.0.1:8000`). See the root `README.md` for install and quickstart.
+There is no web UI — the CLI is the canonical surface.
 
 ## Commands (verified against `cli.py`)
 

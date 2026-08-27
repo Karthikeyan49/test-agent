@@ -1,3 +1,26 @@
+"""
+Optional REST API server for SystemIntel (FastAPI).
+
+This module is NOT used by the SystemIntel CLI (`cli.py`) or by `run_all.py`.
+The CLI is fully self-contained and needs none of the web dependencies below;
+this file is an optional HTTP surface that exposes the same scan/graph engine
+over REST for callers that prefer an API to the command line.
+
+Because it is optional, its dependencies are not required to run the CLI. To use
+this server, install them explicitly:
+
+    pip install fastapi pydantic uvicorn
+
+Then launch it (binds to 127.0.0.1:8000 by default):
+
+    python3 backend/main.py
+    # or: uvicorn backend.main:app --host 127.0.0.1 --port 8000
+
+Endpoints: POST /api/v1/scan, GET /api/v1/graph.
+
+Companion Pydantic response schemas live in `backend/models.py`.
+"""
+
 import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware

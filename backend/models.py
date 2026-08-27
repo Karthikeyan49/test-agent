@@ -1,6 +1,14 @@
 """
-SQLAlchemy & Pydantic Database Schema Models for SystemIntel Backend
+Pydantic schema models for the OPTIONAL SystemIntel REST API (`backend/main.py`).
 Represents Graph Entities, Nodes, Edges, Workflows, Test Cases, Runs, and Reports.
+
+These models are part of the optional FastAPI server surface only; the SystemIntel
+CLI (`cli.py`) and `run_all.py` do not import this module and do not require it.
+Using it needs the optional web dependency:
+
+    pip install pydantic
+
+See `backend/main.py` for the optional API server and how to run it.
 """
 
 from pydantic import BaseModel, Field

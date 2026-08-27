@@ -48,6 +48,7 @@ OFFLINE_SELFTEST_MODULES = [
     "spec_oracle",
     "endpoint_contracts",
     "scenario_contracts",
+    "scenarios",            # multi-page use-case flow generator; AI-summary checks skip-gate offline
     "scenario_runner",      # 3-way runner + additive edge/requirement oracle findings
     "test_recorder",        # live per-test JSONL ledger + HTML render
     "scenario_reports",

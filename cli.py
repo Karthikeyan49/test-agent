@@ -1547,6 +1547,244 @@ def cmd_test(args):
             _recorder.record(tc_result)
             if _recorder.n % 50 == 0: render_ledger(_recorder.jsonl, _recorder.html)
 
+    # ── Opt-in EXTRA oracle passes (first-class --security-oracles / --ui-audits) ─
+    # These wire the previously-unreachable injection_oracle / authz_oracle /
+    # ui_audits modules into `cli.py test`. Each probe is recorded as a synthetic
+    # tc_result folded into run_results / the summary / the --live-report ledger,
+    # exactly like a normal test (verdict: a found vuln or serious a11y issue = FAIL,
+    # safe = PASS, can't-evaluate = SKIP). All heavy imports are guarded INSIDE the
+    # branches, so a normal run (neither flag set) is completely unaffected.
+    _extra_seq = {}
+
+    def _record_extra(category, title, verdict, reason, finding_key, finding,
+                      duration_ms=0, id_prefix="EXTRA"):
+        """Fold one extra-oracle probe into run_results + the counters + the ledger."""
+        nonlocal passed_count, failed_count, skipped_count, total
+        _extra_seq[id_prefix] = _extra_seq.get(id_prefix, 0) + 1
+        tcr = {
+            "testId":           f"{id_prefix}-{_extra_seq[id_prefix]:05d}",
+            "title":            title,
+            "category":         category,
+            "playwrightResult": None,
+            "httpResults":      [],
+            "dbResults":        [],
+            "overallStatus":    verdict,
+            "failureReasons":   ([reason] if verdict == "FAIL" else []),
+            "durationMs":       duration_ms,
+            # A can't-evaluate SKIP verified nothing live — it is never counted as executed.
+            "assertionsExecuted": 0 if verdict == "SKIPPED" else 1,
+        }
+        if finding is not None:
+            tcr[finding_key] = finding
+        if verdict == "PASS":
+            passed_count += 1
+        elif verdict == "FAIL":
+            failed_count += 1
+        else:
+            skipped_count += 1
+        total += 1
+        run_results.append(tcr)
+        if _recorder:
+            _recorder.record(tcr)
+            if _recorder.n % 50 == 0: render_ledger(_recorder.jsonl, _recorder.html)
+        col = {"PASS": GREEN, "FAIL": RED}.get(verdict, YELLOW)
+        print(f"  {col}{verdict:7s}{RESET} {title[:58]:58s} {DIM}{str(reason)[:58]}{RESET}")
+        return tcr
+
+    # ── 5. Security oracles — differential SQLi/XSS + IDOR/privilege ─────────────
+    if getattr(args, "security_oracles", False):
+        section("Security Oracles — injection (SQLi/XSS) + authz (IDOR/privilege)")
+        try:
+            try:
+                from injection_oracle import check_sql_injection, check_reflected_xss
+                from authz_oracle     import check_idor, check_privilege
+            except ImportError:                                                   # pragma: no cover
+                from backend.injection_oracle import check_sql_injection, check_reflected_xss  # type: ignore
+                from backend.authz_oracle     import check_idor, check_privilege               # type: ignore
+            import re as _re_sec
+
+            # Endpoints/contracts come from the loaded graph (preferred) or the analysis.
+            _sec_graph = _loaded if (_loaded and (_loaded.get("requestContracts") or _loaded.get("apiEndpoints"))) else {
+                "requestContracts": (analysis.get("requestContracts", []) if isinstance(analysis, dict) else []),
+                "apiEndpoints":     analysis.get("apiEndpoints", []),
+            }
+            admin_token = getattr(args, "auth_token", None) or ""     # owner/admin identity
+            other_token = getattr(args, "other_token", None) or ""    # attacker/non-admin identity
+
+            # The oracle `run` callable wraps HTTPRunner.run_assertion, defaulting to the
+            # admin token for injection probes (which carry none) and honoring the
+            # per-assertion authToken the authz probes set. The non-local write guard is
+            # honored here too — mutating verbs against a non-local target SKIP.
+            def _sec_run(a):
+                verb = (a.get("endpoint", "GET").strip().split(" ", 1)[0] or "GET").upper()
+                if block_writes and verb in ("POST", "PUT", "PATCH", "DELETE"):
+                    return {"skipped": True,
+                            "skipReason": "write blocked: non-local target without --allow-nonlocal-writes"}
+                tok = a.get("authToken") or admin_token
+                return http_runner.run_assertion({**a, "authToken": tok,
+                                                  "headers": {"Content-Type": "application/json"}})
+
+            def _sec_value(field):
+                f = str(field).lower()
+                if "email" in f: return "probe@demo.local"
+                if "phone" in f or "mobile" in f: return "9990001112"
+                if "password" in f: return "Test1234!"
+                if "pin" in f: return "560001"
+                if f.endswith("_id") or f == "id": return 1
+                if any(k in f for k in ("qty", "quantity", "amount", "price", "count", "total", "stock")): return 5
+                if "date" in f: return "2026-01-01"
+                if "status" in f: return "active"
+                return "probe"
+
+            def _sec_verdict(res):
+                # oracle: passed True -> safe (PASS); passed False -> vulnerable (FAIL); else SKIP
+                if res.get("passed") is True:  return "PASS"
+                if res.get("passed") is False: return "FAIL"
+                return "SKIPPED"
+
+            if not admin_token:
+                print(f"{YELLOW}[!] No --auth-token — injection probes run unauthenticated and IDOR baselines will SKIP.{RESET}")
+            if not other_token:
+                print(f"{YELLOW}[!] No --other-token — IDOR/privilege probes will SKIP (they need a non-admin token).{RESET}")
+
+            # (a) Injection: every writable request-contract field × {SQLi, XSS}.
+            contracts = [c for c in _sec_graph.get("requestContracts", [])
+                         if c.get("method") in ("POST", "PUT", "PATCH") and c.get("fields")]
+            print(f"{CYAN}[+] Injection: {len(contracts)} write-endpoint contract(s) with fields{RESET}")
+            for c in contracts:
+                ep = f'{c["method"]} {c["path"]}'
+                fields = c["fields"]
+                names = (list(fields.keys()) if isinstance(fields, dict)
+                         else [(x.get("name") if isinstance(x, dict) else x) for x in fields])
+                names = [n for n in names if n][:8]
+                baseline = {n: _sec_value(n) for n in names}
+                for fld in names:
+                    for kind, fn in (("SQLi", check_sql_injection), ("XSS", check_reflected_xss)):
+                        t0 = time.time()
+                        try:
+                            res = fn(ep, fld, baseline, _sec_run)
+                        except Exception as _e:
+                            _record_extra(f"Security · Injection · {kind}", f"{kind}: {ep} [{fld}]",
+                                          "SKIPPED", f"err:{type(_e).__name__}", "securityFinding",
+                                          None, round((time.time() - t0) * 1000), "SEC")
+                            continue
+                        _record_extra(f"Security · Injection · {kind}", f"{kind}: {ep} [{fld}]",
+                                      _sec_verdict(res), res.get("reason", ""), "securityFinding",
+                                      {k: res.get(k) for k in ("technique", "kind", "field", "vulnerable", "reason", "skipped")},
+                                      round((time.time() - t0) * 1000), "SEC")
+
+            # (b) IDOR (horizontal): GET endpoints with a {param}; substitute it with 1.
+            id_eps = [e for e in _sec_graph.get("apiEndpoints", [])
+                      if e.get("method") == "GET" and "{" in (e.get("path", "") or "")]
+            print(f"{CYAN}[+] IDOR: {len(id_eps)} resource-id GET endpoint(s){RESET}")
+            for e in id_eps:
+                ep = f'GET {_re_sec.sub(r"{[^}]+}", "1", e["path"])}'
+                t0 = time.time()
+                try:
+                    res = check_idor(ep, _sec_run, admin_token, other_token)
+                except Exception as _ex:
+                    _record_extra("Security · Authz · IDOR", f"IDOR: {ep}", "SKIPPED",
+                                  f"err:{type(_ex).__name__}", "securityFinding", None,
+                                  round((time.time() - t0) * 1000), "SEC")
+                    continue
+                _record_extra("Security · Authz · IDOR", f"IDOR: {ep}", _sec_verdict(res),
+                              res.get("reason", ""), "securityFinding",
+                              {k: res.get(k) for k in ("technique", "kind", "endpoint", "vulnerable", "reason", "skipped")},
+                              round((time.time() - t0) * 1000), "SEC")
+
+            # (c) Privilege (vertical): /admin/* GET endpoints without a path param.
+            adm_eps = [e for e in _sec_graph.get("apiEndpoints", [])
+                       if "/admin/" in (e.get("path", "") or "") and e.get("method") == "GET"
+                       and "{" not in (e.get("path", "") or "")][:150]
+            print(f"{CYAN}[+] Privilege: {len(adm_eps)} admin GET endpoint(s) (cap 150){RESET}")
+            for e in adm_eps:
+                ep = f'GET {e["path"]}'
+                t0 = time.time()
+                try:
+                    res = check_privilege(ep, _sec_run, other_token)
+                except Exception as _ex:
+                    _record_extra("Security · Authz · Privilege", f"PRIV: {ep}", "SKIPPED",
+                                  f"err:{type(_ex).__name__}", "securityFinding", None,
+                                  round((time.time() - t0) * 1000), "SEC")
+                    continue
+                _record_extra("Security · Authz · Privilege", f"PRIV: {ep}", _sec_verdict(res),
+                              res.get("reason", ""), "securityFinding",
+                              {k: res.get(k) for k in ("technique", "kind", "endpoint", "vulnerable", "reason", "skipped")},
+                              round((time.time() - t0) * 1000), "SEC")
+        except Exception as _e:
+            print(f"{YELLOW}[!] Security oracles failed (run otherwise unaffected): {type(_e).__name__}: {_e}{RESET}")
+
+    # ── 6. UI audits — WCAG accessibility over the app's pages (needs the browser) ─
+    if getattr(args, "ui_audits", False):
+        section("UI Audits — WCAG accessibility over the app's pages")
+        if not playwright_runner:
+            print(f"{YELLOW}[!] UI audits need the browser, but none is available "
+                  f"(--no-browser or Playwright not installed) — skipping.{RESET}")
+            _record_extra("UI audit · a11y", "Accessibility audit", "SKIPPED",
+                          "no browser available", "auditFinding", None, 0, "AUD")
+        else:
+            try:
+                from ui_audits import audit_accessibility
+                ui_base = (getattr(args, "ui_base_url", None) or base_url).rstrip("/")
+                page = playwright_runner.page
+
+                # Best-effort login so protected pages render instead of redirecting.
+                ui_user = getattr(args, "auth_user", None) or "admin@demo.local"
+                ui_pass = getattr(args, "auth_pass", None) or ""
+                try:
+                    page.goto(f"{ui_base}/login", wait_until="networkidle", timeout=25000)
+                    page.fill('input[type="email"], input[name="email"]', ui_user, timeout=6000)
+                    if page.locator('input[type="password"]').count():
+                        page.fill('input[type="password"]', ui_pass, timeout=6000)
+                    page.click('button[type="submit"]', timeout=6000)
+                    page.wait_for_timeout(2000)
+                except Exception as _le:
+                    print(f"{DIM}  login note: {str(_le)[:70]}{RESET}")
+
+                # Audit routes from the graph's pages (fall back to the site root).
+                _pages = ((_loaded.get("pages") if _loaded else None)
+                          or analysis.get("pages", []) or [])
+                routes = []
+                for p in _pages:
+                    rp = p.get("routePath") or p.get("route") or ""
+                    if isinstance(rp, str) and rp.startswith("/") and rp not in routes:
+                        routes.append(rp)
+                if not routes:
+                    routes = ["/"]
+                print(f"{CYAN}[+] Auditing {len(routes)} page route(s) for accessibility{RESET}")
+
+                for route in routes:
+                    t0 = time.time()
+                    try:
+                        page.goto(f"{ui_base}{route}", wait_until="networkidle", timeout=25000)
+                        page.wait_for_timeout(500)
+                        if "/login" in (page.url or ""):
+                            _record_extra("UI audit · a11y", f"Accessibility: {route}", "SKIPPED",
+                                          "auth redirect to /login", "auditFinding",
+                                          {"route": route}, round((time.time() - t0) * 1000), "AUD")
+                            continue
+                        issues = audit_accessibility(page)
+                        serious = [i for i in issues if i.get("severity") == "serious"]
+                        if not issues:
+                            _record_extra("UI audit · a11y", f"Accessibility: {route}", "PASS",
+                                          "no accessibility issues", "auditFinding",
+                                          {"route": route, "issues": []},
+                                          round((time.time() - t0) * 1000), "AUD")
+                        else:
+                            verdict = "FAIL" if serious else "SKIPPED"
+                            reason = ", ".join(f'{i.get("rule")}×{i.get("count")}' for i in issues[:5])
+                            _record_extra("UI audit · a11y", f"Accessibility: {route}", verdict,
+                                          reason, "auditFinding",
+                                          {"route": route, "issues": issues,
+                                           "seriousCount": sum(i.get("count", 0) for i in serious)},
+                                          round((time.time() - t0) * 1000), "AUD")
+                    except Exception as _pe:
+                        _record_extra("UI audit · a11y", f"Accessibility: {route}", "SKIPPED",
+                                      f"err:{type(_pe).__name__}", "auditFinding",
+                                      {"route": route}, round((time.time() - t0) * 1000), "AUD")
+            except Exception as _e:
+                print(f"{YELLOW}[!] UI audits failed (run otherwise unaffected): {type(_e).__name__}: {_e}{RESET}")
+
     total_duration = round((time.time() - start_total) * 1000, 2)
 
     # ── Cleanup runners ─────────────────────────────────────────────────
@@ -1907,6 +2145,9 @@ Examples:
     tp.add_argument("--auth-user",      help="Username for --auth-login-url")
     tp.add_argument("--auth-pass",      help="Password for --auth-login-url")
     tp.add_argument("--auth-token-path", help="Dot path to the token in the login response JSON (default: token)")
+    tp.add_argument("--other-token",   help="A second, NON-admin bearer token. Required by --security-oracles for the IDOR (horizontal) and privilege-escalation (vertical) differential checks — the admin token (--auth-token) is the owner/admin identity, this is the attacker/non-admin identity.")
+    tp.add_argument("--security-oracles", action="store_true", help="Run the differential security oracles against the graph's endpoints: injection (boolean-differential SQLi + reflected XSS on every writable request-contract field) and authz (IDOR on resource-id GETs + privilege escalation on /admin/* GETs). A real vuln = FAIL, safe = PASS, can't-evaluate = SKIP. IDOR/privilege need --other-token.")
+    tp.add_argument("--ui-audits",     action="store_true", help="Run the WCAG accessibility audit (ui_audits) over the app's pages in the browser (needs Playwright; incompatible with --no-browser). A serious a11y violation on a page = FAIL, moderate/minor = SKIP, clean = PASS.")
     tp.add_argument("--db-host",      default="localhost", help="(PostgreSQL/MySQL) database host")
     tp.add_argument("--db-port",      help="(PostgreSQL/MySQL) database port")
     tp.add_argument("--db-name",      help="(PostgreSQL/MySQL) database name")
