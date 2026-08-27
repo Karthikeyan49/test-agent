@@ -571,6 +571,31 @@ def run_mutation_mode(args, test_cases):
         print(f"{CYAN}[+] Pagination oracle armed on {len(_pag_eps)} list endpoint(s): "
               f"{', '.join(_pag_eps[:5])}{'…' if len(_pag_eps) > 5 else ''}{RESET}")
 
+    # Metamorphic collection-content checks complement the pagination oracle: the
+    # flat suite (and pagination oracle) never inspect `total`, `total_pages`, or
+    # whether successive pages actually walk the collection — so mutations to the
+    # `ceil(total/limit)` formula, the OFFSET math (`($page-1)*$limit`) and the
+    # COUNT query keep returning 200 and survive. A collection content check (total
+    # invariant across pages, page-count sanity, single-page count, offset coverage)
+    # flips when that logic breaks → the mutant is killed. Same lifecycle as above:
+    # arm ONCE on the in-scope paginated GET collections, re-check every run.
+    try:
+        from collection_oracle import check_collection as _check_col
+    except ImportError:                                                        # pragma: no cover
+        from backend.collection_oracle import check_collection as _check_col   # type: ignore
+    _col_run = _pag_run
+    _col_eps = []
+    for ep in _pag_candidates:
+        try:
+            v = _check_col(ep, _col_run)
+            if not v.get("skipped"):       # a real paginated collection we can assert on
+                _col_eps.append(ep)
+        except Exception:
+            pass
+    if _col_eps:
+        print(f"{CYAN}[+] Collection oracle armed on {len(_col_eps)} list endpoint(s): "
+              f"{', '.join(_col_eps[:5])}{'…' if len(_col_eps) > 5 else ''}{RESET}")
+
     def run_tests():
         # Make sure the server executes the source currently on disk.
         if not _reset_server_cache():
@@ -592,6 +617,19 @@ def run_mutation_mode(args, test_cases):
         for ep in _pag_eps:
             try:
                 v = _check_pag(ep, _pag_run)
+            except Exception:
+                continue
+            if v.get("skipped"):
+                continue
+            if v.get("passed"):
+                passed += 1
+            else:
+                failed += 1
+        # Metamorphic collection content checks (kill total/total_pages/offset value
+        # mutations that keep a 200 and so escape the status-only assertions above).
+        for ep in _col_eps:
+            try:
+                v = _check_col(ep, _col_run)
             except Exception:
                 continue
             if v.get("skipped"):
