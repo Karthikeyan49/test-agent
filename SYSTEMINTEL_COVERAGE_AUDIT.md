@@ -144,6 +144,14 @@ After the audit below (§5) flagged them, these were run live:
 - **`report_build.py`** — new committed consolidated report builder: reads every `*_ledger.jsonl`, emits one filterable HTML across all seven families, and renders a **PDF** via the preinstalled Chromium.
 - **Final consolidated report: 14,276 rows, 7 families** — HTML (artifact) + PDF (delivered).
 
+### 3.8 FOURTH WAVE — AI-assisted features (Gemini) ✅
+With the Gemini key supplied via `SYSTEMINTEL_AI_API_KEY` (env only, never written), all four AI-gated features were run:
+- **`--scenarios-ai`** — AI-designed 3-way scenarios (Gemini `gemini-flash-lite-latest`): 60 executed, all FAIL (same route/FK mismatch as the deterministic scenarios).
+- **`--explore`** — Gemini proposed **8 exploratory edge-case scenarios** grounded on the graph (1,683 total tests generated).
+- **`agent`** subcommand — autonomous **ReAct ran 12 steps** (THOUGHT → READ_FILE OrderController/ProductController, QUERY_GRAPH …), investigating data-integrity gaps.
+- **`vision_gemini`** — browser → screenshot (30 KB) → Gemini vision call executed end-to-end, but returned **HTTP 429 (quota exhausted)** because the concurrent AI runs burned the free-tier quota. Note: `vision_gemini` retries on 429 but does **not** rotate models like `ai_provider` does — a real improvement opportunity.
+- **Model switching verified:** `ai_provider` rotated across Gemini models under load (`gemini-flash-latest` ↔ `gemini-flash-lite-latest`) — the intended per-model-quota rotation.
+
 ## 4. Bugs found & fixed in the tool (this effort)
 
 | # | Bug | Fix | Commit |
@@ -178,7 +186,7 @@ All 7 commits pushed to `claude/new-session-bve7yu`; 32/32 self-tests green.
 | ~~**Exhaustive API mode**~~ | `--exhaustive` | ✅ **RUN (§3.6)** — 101,943 tests generated + executing (streamed; ~3 h full) | Uncapped API. |
 | ~~**UI-quality audit layer**~~ | `ui_audits.py` | ✅ **RUN (§3.7)** — 35 rows, pervasive serious a11y violations | Accessibility checks. |
 | **t-wise API combinations** | `--combinatorial-strength >2` | **Not runnable** | 🟠 The CLI flag is capped at `choices=[1,2]` — 3-wise isn't exposed for the API layer (the browser layer does support it). |
-| **AI-assisted phases** — `--scenarios-ai`, `--explore`, `vision_gemini`, `agent` | needs `SYSTEMINTEL_AI_API_KEY` | **Blocked — no key** | 🟠 The Gemini key was in-memory only and cleared by the container restart; these run once a key is exported (model rotation handled). |
+| ~~**AI-assisted phases**~~ — `--scenarios-ai`, `--explore`, `vision_gemini`, `agent` | needs `SYSTEMINTEL_AI_API_KEY` | ✅ **RUN (§3.8)** with the Gemini key — scenarios-AI, 8 explore edge-cases, 12-step agent, vision (browser+call OK, hit 429 quota); model rotation verified | Now executed. |
 | **Spec / intent oracle** | `spec_oracle.py` (via `--openapi`) | **Not applicable** | 🟡 No OpenAPI spec exists for this app. |
 | **Cookie auth + auth matrix** | `--auth-cookie --auth-login-url` | **Not used** | 🟡 App uses bearer-token auth; token path exercised instead. |
 | **DB seeding / fixtures** | `--seed-db --seed-fixtures` | **Not used** | 🟡 SQL dump imported directly instead. |
