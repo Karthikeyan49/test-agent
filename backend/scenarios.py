@@ -162,11 +162,24 @@ def _field_value(field_name: str, spec: Optional[Dict[str, Any]] = None) -> Any:
             return True
         if t == "date":
             return "2026-01-01"
-        # typed text (or unspecified) — fit the max length if the rule gave one
-        base = "Test" + re.sub(r'[^A-Za-z0-9]', '', spec.get("name") or field_name or "")[:12]
-        base = base or "TestValue"
+        # typed text (or unspecified): the contract carried no strong rule for
+        # this field, so fall back to a NAME-aware realistic value (a real date
+        # for *_date, an int for *_id/*_number, phone/pincode/email/amount by
+        # name) rather than a literal "Test<name>" that strict validators reject
+        # (e.g. expense_date, source_id). Honor maxLength when the rule set one.
+        nm = spec.get("name") or field_name or ""
+        try:
+            try:
+                from valid_data import realistic_value
+            except ImportError:
+                from backend.valid_data import realistic_value  # type: ignore
+            val = realistic_value({"name": nm})
+        except Exception:
+            val = "Test" + re.sub(r'[^A-Za-z0-9]', '', nm)[:12] or "TestValue"
         mx = spec.get("maxLength")
-        return base[:mx] if isinstance(mx, int) and mx > 0 else base
+        if isinstance(val, str) and isinstance(mx, int) and mx > 0:
+            val = val[:mx]
+        return val
     # No contract spec — synthesize a name-accurate valid value (10-digit phone,
     # 6-digit pincode, real email/GSTIN, amount/qty/date …) so the generated create
     # body satisfies strict validators instead of sending "TestValue" everywhere.
