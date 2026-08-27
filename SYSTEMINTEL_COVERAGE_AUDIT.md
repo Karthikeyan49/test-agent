@@ -138,6 +138,12 @@ After the audit below (§5) flagged them, these were run live:
 
 ---
 
+### 3.7 THIRD WAVE — UI audit, orchestrator, and PDF report ✅
+- **`ui_audits` accessibility layer** (was unwired) RUN across 13 pages → **35 rows, all FAIL**: the app has **pervasive serious accessibility violations** on every page (missing image-alt, unlabeled form controls, etc.). Real finding.
+- **`run_all.py`** — new committed master orchestrator: runs every family in ordered phases (`api → security+audit (parallel) → ui → scenarios → mutation → [exhaustive] → report`), bounded parallelism (heavy phases sequenced after a concurrent-load OOM), AI phases via `--ai` using the tool's Gemini multi-model rotation (key read from `SYSTEMINTEL_AI_API_KEY` in env only, never written).
+- **`report_build.py`** — new committed consolidated report builder: reads every `*_ledger.jsonl`, emits one filterable HTML across all seven families, and renders a **PDF** via the preinstalled Chromium.
+- **Final consolidated report: 14,276 rows, 7 families** — HTML (artifact) + PDF (delivered).
+
 ## 4. Bugs found & fixed in the tool (this effort)
 
 | # | Bug | Fix | Commit |
@@ -170,17 +176,13 @@ All 7 commits pushed to `claude/new-session-bve7yu`; 32/32 self-tests green.
 | ~~**Differential injection oracle**~~ | `injection_oracle.py` | ✅ **RUN (§3.6)** — wired + executed; 329 SQLi + 329 XSS probes; **3 SQLi findings** | Now actually scored the app. |
 | ~~**Authz / IDOR oracle**~~ | `authz_oracle.py` | ✅ **RUN (§3.6)** — 69 IDOR + 86 privilege probes; none vulnerable | Real IDOR/authz testing executed. |
 | ~~**Exhaustive API mode**~~ | `--exhaustive` | ✅ **RUN (§3.6)** — 101,943 tests generated + executing (streamed; ~3 h full) | Uncapped API. |
-| **t-wise API combinations** | `--combinatorial-strength >2` | **Not used** | 🟠 API combinations ran pairwise only. |
-| **Spec / intent oracle** | `spec_oracle.py` (via `--openapi`) | **Not run** | 🟠 No OpenAPI spec supplied. |
-| **UI-quality audit layer** | `ui_audits.py` | **Not run** | 🟡 Accessibility / UI-quality checks. |
-| **Agentic exploratory crawler** | `--explore` / `explorer.py` | **Not run** | 🟡 Dynamic endpoint/page discovery. |
-| **Vision field mapper** | `vision_gemini.py` | **Not used** | 🟡 Screenshot-based field mapping fallback. |
-| **Autonomous ReAct agent** | `agent` subcommand | **Not run** | 🟡 |
-| **Cookie auth + auth matrix** | `--auth-cookie --auth-login-url` | **Not used** | 🟡 Token auth only. |
-| **DB seeding / fixtures** | `--seed-db --seed-fixtures` / `db_seeder.py`, `fixtures.py` | **Not used** | 🟡 SQL dump imported directly instead. |
-| **OpenAPI ingestion** | `--openapi` | **Not used** | 🟡 |
-| **Config presets** | `--preset --config` | **Not used** | 🟡 |
-| **Response-body capture** | `--include-response-bodies` | **Not used** | 🟡 |
+| ~~**UI-quality audit layer**~~ | `ui_audits.py` | ✅ **RUN (§3.7)** — 35 rows, pervasive serious a11y violations | Accessibility checks. |
+| **t-wise API combinations** | `--combinatorial-strength >2` | **Not runnable** | 🟠 The CLI flag is capped at `choices=[1,2]` — 3-wise isn't exposed for the API layer (the browser layer does support it). |
+| **AI-assisted phases** — `--scenarios-ai`, `--explore`, `vision_gemini`, `agent` | needs `SYSTEMINTEL_AI_API_KEY` | **Blocked — no key** | 🟠 The Gemini key was in-memory only and cleared by the container restart; these run once a key is exported (model rotation handled). |
+| **Spec / intent oracle** | `spec_oracle.py` (via `--openapi`) | **Not applicable** | 🟡 No OpenAPI spec exists for this app. |
+| **Cookie auth + auth matrix** | `--auth-cookie --auth-login-url` | **Not used** | 🟡 App uses bearer-token auth; token path exercised instead. |
+| **DB seeding / fixtures** | `--seed-db --seed-fixtures` | **Not used** | 🟡 SQL dump imported directly instead. |
+| **Config presets / response-body capture** | `--preset --config --include-response-bodies` | **Not used** | 🟡 Cosmetic / optional. |
 
 ---
 
