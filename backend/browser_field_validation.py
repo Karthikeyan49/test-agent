@@ -656,7 +656,8 @@ def run_browser_field_validation(page, route: str, base_url: str,
                                  fields_meta: Optional[List[Dict[str, Any]]] = None,
                                  submit_selector: str = 'button[type="submit"]',
                                  max_fields: int = 0, rich: bool = True,
-                                 rich_max_per_method: Optional[int] = 8) -> Dict[str, Any]:
+                                 rich_max_per_method: Optional[int] = 8,
+                                 shots_dir: Optional[str] = None) -> Dict[str, Any]:
     """
     For a form at `route`, drive every mapped field through its value battery in a
     live browser and record the frontend's reaction. `field_selectors` maps a field
@@ -921,6 +922,17 @@ def run_browser_field_validation(page, route: str, base_url: str,
                     rec["status"] = "PASS"
             except Exception as e:
                 rec["status"] = "SKIP"; rec["signal"] = f"err:{type(e).__name__}"
+            # Evidence screenshot on FAIL (a bad value the app ACCEPTED) — the case
+            # that actually needs looking at. Attached to the report as a thumbnail.
+            if shots_dir and rec.get("status") == "FAIL":
+                try:
+                    from screenshots import snap
+                except ImportError:
+                    from backend.screenshots import snap  # type: ignore
+                _sf = f"{route.strip('/').replace('/', '_')}_{name}_{c.get('case','x')}.png"
+                _p = snap(page, __import__("os").path.join(shots_dir, _sf))
+                if _p:
+                    rec["shot"] = _p
             results.append(rec)
             _ensure_on_form()   # a bad value that was accepted navigates away — reset
         _restore(name)   # restore this field before the next one

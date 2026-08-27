@@ -132,6 +132,7 @@ tr:hover td{{background:var(--surface2)}}.fam{{font-size:11px;font-weight:600;pa
 .fam-SEC{{color:var(--fSec);border-color:color-mix(in srgb,var(--fSec) 40%,transparent)}}.fam-SCN{{color:var(--fScn);border-color:color-mix(in srgb,var(--fScn) 40%,transparent)}}
 .fam-AUD{{color:var(--fAud);border-color:color-mix(in srgb,var(--fAud) 40%,transparent)}}
 .v{{font-weight:600;font-family:"IBM Plex Mono",monospace}}.v.PASS{{color:var(--ok)}}.v.FAIL{{color:var(--bad)}}.v.SKIPPED{{color:var(--warn)}}.r{{color:var(--mut);max-width:340px}}
+a.shot{{display:inline-block;vertical-align:middle;margin-right:7px}}a.shot img{{height:30px;width:auto;max-width:54px;border:1px solid var(--bd);border-radius:4px;object-fit:cover;object-position:top left}}a.shot:hover img{{outline:2px solid var(--ac)}}
 </style></head><body><div class="wrap">
 <p class="eyebrow">SystemIntel · consolidated run</p>
 <h1>Consolidated Test Report</h1>
@@ -153,7 +154,7 @@ function render(){{const q=fQ.toLowerCase();
  const rs=DATA.filter(r=>(fFam==="ALL"||r.fam===fFam)&&(fV==="ALL"||r.v===fV)&&(!fC||r.cat===fC)&&(!q||((r.id||'')+(r.ep||'')+(r.r||'')+(r.cat||'')).toLowerCase().includes(q)));
  count.textContent=rs.length.toLocaleString()+" of "+DATA.length.toLocaleString()+" shown";
  const cap=rs.slice(0,4000);let h='';
- for(const r of cap){{h+='<tr><td><span class="fam fam-'+(FAMCLS[r.fam]||'API')+'">'+esc(r.fam.split(' (')[0])+'</span></td><td class=mono>'+esc(r.id)+'</td><td>'+esc(r.cat)+'</td><td class=mono>'+esc(r.m)+'</td><td class=mono>'+esc(r.ep)+'</td><td class=num>'+esc(r.exp)+'</td><td class=num>'+esc(r.act)+'</td><td class="v '+r.v+'">'+esc(r.v)+'</td><td class=r>'+esc(r.r)+'</td><td class=num>'+(r.ms||0)+'</td></tr>';}}
+ for(const r of cap){{h+='<tr><td><span class="fam fam-'+(FAMCLS[r.fam]||'API')+'">'+esc(r.fam.split(' (')[0])+'</span></td><td class=mono>'+esc(r.id)+'</td><td>'+esc(r.cat)+'</td><td class=mono>'+esc(r.m)+'</td><td class=mono>'+esc(r.ep)+'</td><td class=num>'+esc(r.exp)+'</td><td class=num>'+esc(r.act)+'</td><td class="v '+r.v+'">'+esc(r.v)+'</td><td class=r>'+(r.shot?('<a class=shot href="'+r.shot+'" target=_blank rel=noopener title="open screenshot"><img src="'+r.shot+'" alt=shot></a>'):'')+esc(r.r)+'</td><td class=num>'+(r.ms||0)+'</td></tr>';}}
  if(rs.length>4000)h+='<tr><td colspan=10 style="text-align:center;color:var(--mut);padding:14px">…first 4,000 of '+rs.length.toLocaleString()+' — narrow the filter</td></tr>';
  tb.innerHTML=h;}}
 document.querySelectorAll('.pill').forEach(p=>p.onclick=()=>{{const k=p.dataset.k;document.querySelectorAll('.pill[data-k="'+k+'"]').forEach(x=>x.classList.remove('on'));p.classList.add('on');if(k==="fam")fFam=p.dataset.v;else fV=p.dataset.v;render();}});
