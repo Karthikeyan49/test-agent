@@ -114,7 +114,27 @@ All **9 create forms** (`/customers, /products, /purchase/vendors, /purchase/ord
 ### 3.5 Reporting / infrastructure ✅
 - `--live-report` (per-test JSONL + HTML ledger, `test_recorder.py`).
 - `--mutation-ledger` (per-mutant JSONL).
-- Unified cross-family HTML ledger (aggregator script over the four JSONL sources).
+- Unified cross-family HTML ledger (aggregator script over the JSONL sources).
+
+### 3.6 SECOND WAVE — previously-unrun capabilities, now executed ✅
+After the audit below (§5) flagged them, these were run live:
+
+**Differential Security oracles** (`injection_oracle` + `authz_oracle` — were built but wired into no run path):
+- **813 probes → PASS 739 · SKIP 71 · FAIL 3**
+- SQLi 329 · reflected-XSS 329 · IDOR 69 · privilege 86
+- 🔴 **3 real findings (error-based SQL injection signal — server 5xx on a SQLi payload):**
+  - `POST /auth/send-otp [email]` → 500
+  - `POST /chat [session_id]` → 503
+  - `POST /chat [message]` → 503
+- IDOR (69) + privilege (86): all PASS/SKIP — **no horizontal or vertical privilege escalation found** (the app isolates resources and denies non-admin correctly). Required a second, non-admin token (created for this run).
+
+**Scenario mode** (`--scenarios`, the 3-way UI+API+DB engine):
+- Repo-memory RAG built (197 pages, 40 use-cases, 116 cross-page flows); **166 scenarios generated** (34 CRUD lifecycle + 16 use-case flow + 116 cross-page).
+- Executed 3-way (UI + API + DB). **Result: overwhelmingly FAIL** — the auto-generated CRUD bodies and use-case routes don't match the app's real endpoints/FK requirements (e.g. `POST /admin/workflows` with a synthesised body → api/db FAIL; cross-page scenarios read React component names as routes → ui FAIL). This is an honest characterisation: **scenario mode runs, but its generated scenarios are largely invalid against this specific app** without hand-authored fixtures.
+
+**`--exhaustive` API run:**
+- **101,943 tests generated** with every cap removed — per-field black-box 99,631 (fuzz_misc 24,888 · fuzz_xss 22,814 · fuzz_sqli 20,740 · type 13,756 · length 6,413 · boundary 5,068 · format 4,191 · required 1,630) + combinatorial 637 + metamorphic 148 + invariants 144 + contract 186.
+- Executed live at ~600 tests/min → **full completion ≈ 3 hours** (streamed via `--live-report`, partial-safe). This is itself the honest finding: **truly-exhaustive API is enormous** and impractical to complete in an ephemeral container; the bounded run (§3.1) is the practical default.
 
 ---
 
@@ -141,12 +161,15 @@ All 7 commits pushed to `claude/new-session-bve7yu`; 32/32 self-tests green.
 > These are real, shipped features of the tool that never ran against the app in
 > this campaign (or, in two cases, are wired into no run path at all).
 
+> **Update:** the four 🔴/🟠 items below were RUN in the second wave — see §3.6.
+> They are struck through here and kept for the record.
+
 | Capability | Flag / module | State | Why it matters |
 |---|---|---|---|
-| **Scenario mode** — 3-way UI+API+DB use-case engine: CRUD lifecycle (create→read→DB-exists→update→delete→DB-gone), cross-page data-flow, RAG + AI-designed use-cases | `--scenarios --scenarios-ai` / `scenarios.py`, `scenario_runner.py`, `repo_memory.py`, `scenario_reports.py` | **Not run** | 🔴 The flagship cross-layer mode. None of it is in the ledger. |
-| **Differential injection oracle** (real SQLi/XSS via differential probes) | `injection_oracle.py` | **Built + self-tested, wired into NO run path** | 🔴 Never scored the app. The ledger's fuzz_xss/sqli rows only check "no 5xx", which does **not** prove injection-safety. |
-| **Authz / IDOR oracle** (privilege & object-ownership differential) | `authz_oracle.py` | **Built + self-tested, wired into NO run path** | 🔴 No real IDOR/authz testing executed. |
-| **Exhaustive API mode** | `--exhaustive` | **Not used** | 🟠 API flat run was capped (1500/800/pairwise), not uncapped. |
+| ~~**Scenario mode**~~ — 3-way UI+API+DB use-case engine | `--scenarios` / `scenarios.py`, `scenario_runner.py`, `repo_memory.py` | ✅ **RUN (§3.6)** — 166 scenarios, mostly FAIL (generated scenarios invalid vs this app) | The flagship cross-layer mode. |
+| ~~**Differential injection oracle**~~ | `injection_oracle.py` | ✅ **RUN (§3.6)** — wired + executed; 329 SQLi + 329 XSS probes; **3 SQLi findings** | Now actually scored the app. |
+| ~~**Authz / IDOR oracle**~~ | `authz_oracle.py` | ✅ **RUN (§3.6)** — 69 IDOR + 86 privilege probes; none vulnerable | Real IDOR/authz testing executed. |
+| ~~**Exhaustive API mode**~~ | `--exhaustive` | ✅ **RUN (§3.6)** — 101,943 tests generated + executing (streamed; ~3 h full) | Uncapped API. |
 | **t-wise API combinations** | `--combinatorial-strength >2` | **Not used** | 🟠 API combinations ran pairwise only. |
 | **Spec / intent oracle** | `spec_oracle.py` (via `--openapi`) | **Not run** | 🟠 No OpenAPI spec supplied. |
 | **UI-quality audit layer** | `ui_audits.py` | **Not run** | 🟡 Accessibility / UI-quality checks. |
