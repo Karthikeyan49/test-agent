@@ -539,6 +539,38 @@ def run_mutation_mode(args, test_cases):
         except Exception:
             return False
 
+    # Metamorphic pagination checks strengthen the mutation oracle: the flat
+    # suite asserts mostly on status, so int mutations to a controller's page/limit
+    # defaults and clamps keep returning 200 and survive. A pagination content
+    # check (default page, param echo, row bound, clamp) flips when that logic
+    # breaks → the mutant is killed. Discover the paginated GET collection
+    # endpoints in scope ONCE, then re-check them every run.
+    try:
+        from pagination_oracle import check_pagination as _check_pag
+    except ImportError:                                                       # pragma: no cover
+        from backend.pagination_oracle import check_pagination as _check_pag  # type: ignore
+    _pag_run = lambda a: runner.run_assertion({**a, "headers": auth_headers})
+    _pag_candidates = []
+    _seen_pg = set()
+    for a in api_units:
+        ep = a.get("endpoint", "")
+        m = ep.split(" ", 1)[0].upper() if " " in ep else "GET"
+        path = ep.split(" ", 1)[1] if " " in ep else ep
+        if m == "GET" and "{" not in path and "?" not in path and ep not in _seen_pg:
+            _seen_pg.add(ep)
+            _pag_candidates.append(ep)
+    _pag_eps = []
+    for ep in _pag_candidates:
+        try:
+            v = _check_pag(ep, _pag_run)
+            if not v.get("skipped"):        # a real paginated endpoint we can assert on
+                _pag_eps.append(ep)
+        except Exception:
+            pass
+    if _pag_eps:
+        print(f"{CYAN}[+] Pagination oracle armed on {len(_pag_eps)} list endpoint(s): "
+              f"{', '.join(_pag_eps[:5])}{'…' if len(_pag_eps) > 5 else ''}{RESET}")
+
     def run_tests():
         # Make sure the server executes the source currently on disk.
         if not _reset_server_cache():
@@ -552,6 +584,19 @@ def run_mutation_mode(args, test_cases):
             if "CONNECTION_REFUSED" in (hr.get("error") or ""):
                 continue          # app down — don't miscount as a failure
             if hr.get("passed"):
+                passed += 1
+            else:
+                failed += 1
+        # Metamorphic pagination content checks (kill page/limit value mutations
+        # that keep a 200 and so escape the status-only assertions above).
+        for ep in _pag_eps:
+            try:
+                v = _check_pag(ep, _pag_run)
+            except Exception:
+                continue
+            if v.get("skipped"):
+                continue
+            if v.get("passed"):
                 passed += 1
             else:
                 failed += 1

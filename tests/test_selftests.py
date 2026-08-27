@@ -22,6 +22,7 @@ BACKEND = Path(__file__).resolve().parent.parent / "backend"
 OFFLINE_SELFTEST_MODULES = [
     "metamorphic",          # generator + executor (Q1)
     "injection_oracle",     # differential SQLi / XSS (S2)
+    "pagination_oracle",    # metamorphic pagination content check (kills page/limit mutations)
     "authz_oracle",         # IDOR / privilege differential
     "combinatorial",        # pairwise / t-wise covering-array generation
     "field_edge_oracle",    # per-field in/out edge round-trip oracle
