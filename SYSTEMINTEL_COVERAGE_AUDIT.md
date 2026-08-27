@@ -195,7 +195,21 @@ ProductController **2% → 32%** (13/40) with a representative product set seede
 Key finding: mutation testing needs data — an empty table makes row-count/limit
 differences unobservable, so the checks fire only once the collection has rows.
 Further gains need per-field content oracles (diminishing returns) and are the
-remaining generation-strength work.
+remaining generation-strength work. A second oracle — `collection_oracle`
+(total-count invariance, `total_pages == ceil(total/limit)`, single-page count,
+offset coverage) — was added alongside it in the mutation suite for the
+total/total_pages/offset mutation class.
+
+**Enum/FK grounding — wired and measured.** `fk_grounding` now fills scenario CRUD
+bodies with real enum members and real FK ids read from the live DB (unix-socket
+fallback for socket-only MariaDB; verified: `product_type`→`pellets`,
+`payment_mode`→`Cash`, `product_id`→`1`). End-to-end effect on the 3-way scenario
+run: **PASS 7→9, 422 validation rejects 24→21, 400s 20→18** — real but modest.
+The ceiling is name matching: many request-contract field names don't equal their
+DB column (contract `vendor` vs column `vendor_id`), so grounding can't resolve
+them; closing that needs field-name↔column mapping (singularize/`_id` suffix) and
+is the next increment. Safe by construction — grounding resolves nothing when the
+DB is unreachable, leaving the deterministic path and offline CI unchanged.
 
 ---
 
