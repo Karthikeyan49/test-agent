@@ -109,18 +109,17 @@ _OBSERVE_JS = r"""
 
 def _valid_ui_value(meta: Dict[str, Any]) -> str:
     """A plausibly-valid value for a field, used to build the valid baseline so a
-    single-fault case is genuinely isolated (all other fields stay valid)."""
-    name = str(meta.get("name") or meta.get("fieldName") or "").lower()
-    ftype = str(meta.get("fieldType") or meta.get("type") or "text").lower()
-    if "email" in ftype or _EMAIL.search(name):
-        return "valid.user@example.com"
-    if ftype in ("number", "integer", "float", "tel") or _NUMERICISH.search(name):
-        return "5"
-    if "date" in ftype or "date" in name:
-        return "2023-06-15"
-    if meta.get("enum"):
-        return str(meta["enum"][0])
-    return "ValidValue"
+    single-fault case is genuinely isolated (all other fields stay valid).
+
+    Delegates to valid_data.realistic_value — a constraint- and name-aware
+    generator (10-digit phone, 6-digit pincode, real email/GSTIN, maxLength-aware)
+    so strict forms actually SUBMIT the baseline. Without a submitting baseline the
+    per-field verdicts are untrusted skips; with one they become real PASS/FAIL."""
+    try:
+        from valid_data import realistic_value
+    except ImportError:
+        from backend.valid_data import realistic_value  # type: ignore
+    return str(realistic_value(meta))
 
 
 # ── ENUM / dropdown-domain method (in the browser) ────────────────────────────
