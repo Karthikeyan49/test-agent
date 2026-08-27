@@ -22,14 +22,24 @@ def _body_text_lower(resp: Any) -> str:
 
 
 class HTTPRunner:
+    # Auth endpoints that invalidate the caller's own session/token. Testing
+    # these with the shared --auth-token silently revokes it for every phase
+    # that runs afterwards (scenarios, authz/IDOR, later API tests all 401).
+    import re as _re
+    _SESSION_INVALIDATING = _re.compile(r"/auth/(logout(-all)?|revoke)\b", _re.I)
+
     def __init__(self, base_url: str = "http://localhost:3000", timeout: float = 10.0,
-                 transport=None):
+                 transport=None, protect_session: bool = False):
         self.base_url    = base_url.rstrip('/')
         self.timeout     = timeout
         self.request_log = []
         # Optional httpx transport (used by the offline self-test to inject
         # canned responses). None → real network.
         self._transport  = transport
+        # When True, SKIP session-invalidating auth endpoints (logout/revoke) so
+        # a shared --auth-token survives the whole run. Set by the CLI whenever a
+        # bearer token is supplied and reused across phases.
+        self.protect_session = protect_session
 
     def _full_url(self, path: str) -> str:
         if path.startswith('http://') or path.startswith('https://'):
@@ -69,6 +79,21 @@ class HTTPRunner:
         parts           = method_path.strip().split(' ', 1)
         method          = parts[0].upper() if len(parts) > 1 else 'GET'
         path            = parts[1] if len(parts) > 1 else parts[0]
+
+        # Session-preservation guard: skip logout/revoke so a shared --auth-token
+        # is not silently invalidated for the rest of the run. Honest SKIP, not a
+        # PASS. A caller that explicitly wants to exercise logout can pass
+        # allowSessionInvalidation:true on the assertion (e.g. an auth self-test).
+        if (self.protect_session and self._SESSION_INVALIDATING.search(path or "")
+                and not assertion.get("allowSessionInvalidation")):
+            r = {"type": "API", "endpoint": method_path, "method": method,
+                 "actualStatus": None, "passed": False, "skipped": True,
+                 "skipReason": ("session-invalidating auth endpoint skipped to preserve the "
+                                "shared --auth-token for the rest of the run (scenarios, authz, "
+                                "later API tests). Test logout in isolation to exercise it."),
+                 "durationMs": 0.0, "error": None}
+            self.request_log.append(r)
+            return r
         try:
             url = self._full_url(path)
         except ValueError as e:
@@ -324,6 +349,20 @@ if __name__ == "__main__":
     r = HTTPRunner(base_url="http://localhost:8080", transport=_mock(200)).run_assertion(
         {"type": "API", "endpoint": "POST http://evil.example/steal"})
     assert r.get("passed") is False and "off-origin" in (r.get("error") or ""), r
+
+    # Session-preservation guard: with protect_session on, logout/revoke SKIP
+    # (never fire) so the shared token survives; off by default it fires normally;
+    # and an explicit allowSessionInvalidation override fires even when protected.
+    r = HTTPRunner(transport=_mock(200), protect_session=True).run_assertion(
+        {"type": "API", "endpoint": "POST /auth/logout", "authToken": "tok"})
+    assert r.get("skipped") is True and "session-invalidating" in r.get("skipReason", ""), r
+    r = HTTPRunner(transport=_mock(200), protect_session=False).run_assertion(
+        {"type": "API", "endpoint": "POST /auth/logout", "authToken": "tok"})
+    assert not r.get("skipped"), "logout must fire normally when the session is not protected"
+    r = HTTPRunner(transport=_mock(200), protect_session=True).run_assertion(
+        {"type": "API", "endpoint": "POST /auth/logout", "authToken": "tok",
+         "allowSessionInvalidation": True})
+    assert not r.get("skipped"), "explicit allowSessionInvalidation must let logout fire"
 
     # Q5: a negative that got 4xx but whose body names the injected field →
     #     attribution confirmed; one that does not → flagged unattributed.

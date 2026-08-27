@@ -1243,8 +1243,11 @@ def cmd_test(args):
     if auth.is_active():
         print(f"{GREEN}[✓] Auth active — protected requests carry {'Cookie' if auth.mode=='cookie' else auth.header}{RESET}")
 
-    # HTTP runner
-    http_runner = HTTPRunner(base_url=base_url, timeout=args.timeout)
+    # HTTP runner. Protect the shared session whenever auth is active, so the
+    # suite's own logout/revoke test does not silently invalidate the token that
+    # scenarios, authz/IDOR, and later API tests all depend on.
+    http_runner = HTTPRunner(base_url=base_url, timeout=args.timeout,
+                             protect_session=auth.is_active())
 
     # ── S3: production-write guardrail ──────────────────────────────────────
     # The suite fires real POST/PUT/PATCH/DELETE (and hostile payloads). Pointed
