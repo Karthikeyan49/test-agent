@@ -770,8 +770,26 @@ def run_scenario_mode(args, graph_data):
             print(f"{YELLOW}[!] AI provider not reachable — AI scenarios skipped{RESET}")
             provider = None
 
+    # Ground CRUD bodies against the live DB: real FK ids + real enum members, so
+    # enum/FK creates stop 422-ing. Safe — resolves nothing (NULL grounding) if the
+    # DB is unreachable, leaving the deterministic values untouched.
+    try:
+        try:
+            from fk_grounding import connect_grounding
+        except ImportError:                                                   # pragma: no cover
+            from backend.fk_grounding import connect_grounding                # type: ignore
+        _grounding = connect_grounding(graph_data)
+        if getattr(_grounding, "_conn", None) is not None:
+            print(f"{CYAN}[+] Scenario grounding: live DB connected — FK ids + enum members "
+                  f"will fill CRUD bodies{RESET}")
+    except Exception as _ge:
+        _grounding = None
+        print(f"{YELLOW}[!] Scenario grounding unavailable ({type(_ge).__name__}); "
+              f"using name/type values{RESET}")
+
     scenarios = generate_scenarios(graph_data, repo_memory=memory, provider=provider,
-                                   max_ai=getattr(args, 'scenarios_ai_max', 8))
+                                   max_ai=getattr(args, 'scenarios_ai_max', 8),
+                                   grounding=_grounding)
     by = {}
     for s in scenarios:
         by[s['category']] = by.get(s['category'], 0) + 1

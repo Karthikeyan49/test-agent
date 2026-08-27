@@ -225,7 +225,8 @@ def _crud_lifecycle_scenarios(graph_data: Dict[str, Any],
                               cols_by_name: Dict[str, List[Dict[str, Any]]],
                               name_by_norm: Dict[str, str],
                               tname_by_id: Dict[str, str],
-                              out: Dict[Tuple[str, str], List[str]]) -> List[Dict[str, Any]]:
+                              out: Dict[Tuple[str, str], List[str]],
+                              grounding: Any = None) -> List[Dict[str, Any]]:
     endpoints = graph_data.get("apiEndpoints", []) or []
     contracts_by_key = _contracts_by_key(graph_data)
     ep_by_mp: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -260,11 +261,25 @@ def _crud_lifecycle_scenarios(graph_data: Dict[str, Any],
         # the table's columns. Fixes e.g. POST /queries wanting {name,email,message}
         # instead of the queries-table columns (user_id, query_number, status, …).
         # The DB assertion below still verifies the row in `table`, unchanged.
+        # Grounding first: a REAL existing FK id or a real ENUM member for a
+        # (table, column) — read from the live DB, never guessed. Only overrides
+        # when grounding actually resolves a value; otherwise the name/type value
+        # stands. Turns enum/FK creates that used to 422 into valid bodies. A
+        # NULL grounding (no DB) resolves nothing, so the deterministic path and
+        # the offline self-test are unchanged.
+        _g = grounding
+        def _val(name, spec_or_col, base):
+            if _g is not None:
+                gv = _g.value_for(table, name)
+                if gv is not None:
+                    return gv
+            return base
         contract = contracts_by_key.get(f"POST {_normalize_path(path)}")
         if contract and contract.get("fields"):
-            body = {f["name"]: _field_value(f["name"], f) for f in contract["fields"]}
+            body = {f["name"]: _val(f["name"], f, _field_value(f["name"], f))
+                    for f in contract["fields"]}
         else:
-            body = {c["name"]: _valid_value(c) for c in writable}
+            body = {c["name"]: _val(c["name"], c, _valid_value(c)) for c in writable}
 
         id_path_norm = _normalize_path(path.rstrip('/') + '/{id}')
         get_list_ep   = ep_by_mp.get(("GET", _normalize_path(path)))
@@ -876,7 +891,8 @@ def _maybe_build_repo_memory(graph_data: Dict[str, Any]) -> Optional[Dict[str, A
 
 
 def generate_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dict[str, Any]] = None,
-                       provider: Any = None, max_ai: int = 8) -> List[Dict[str, Any]]:
+                       provider: Any = None, max_ai: int = 8,
+                       grounding: Any = None) -> List[Dict[str, Any]]:
     """Generate professional, multi-step Scenario dicts (scenario_contracts shape)
     from a System Graph. Deterministic categories (crud_lifecycle, use_case_flow,
     cross_page_data) always run; the AI-assisted category only runs when
@@ -897,7 +913,8 @@ def generate_scenarios(graph_data: Dict[str, Any], repo_memory: Optional[Dict[st
     out = _adjacency(edges)
 
     scenarios: List[Dict[str, Any]] = []
-    scenarios += _crud_lifecycle_scenarios(graph_data, cols_by_name, name_by_norm, tname_by_id, out)
+    scenarios += _crud_lifecycle_scenarios(graph_data, cols_by_name, name_by_norm, tname_by_id, out,
+                                           grounding=grounding)
     scenarios += _use_case_flow_scenarios(graph_data, cols_by_name, name_by_norm, tname_by_id, out)
     scenarios += _cross_page_data_scenarios(graph_data, repo_memory)
     scenarios += _ai_assisted_scenarios(graph_data, repo_memory, provider, max_ai)

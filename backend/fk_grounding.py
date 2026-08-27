@@ -308,10 +308,25 @@ def connect_grounding(graph_data: Dict[str, Any]) -> Grounding:
     if cfg:
         try:
             import mysql.connector  # type: ignore
-            conn = mysql.connector.connect(
-                host=cfg["host"], port=cfg["port"], database=cfg["database"],
-                user=cfg["user"], password=cfg["password"], connection_timeout=5,
-            )
+            try:
+                conn = mysql.connector.connect(
+                    host=cfg["host"], port=cfg["port"], database=cfg["database"],
+                    user=cfg["user"], password=cfg["password"], connection_timeout=5,
+                )
+            except Exception:
+                # TCP refused (a socket-only local MariaDB is common — the PHP app
+                # itself may reach the DB over the unix socket). Retry via the
+                # socket before giving up, so FK/enum grounding still works.
+                sock = (os.environ.get("DB_SOCKET") or os.environ.get("MYSQL_UNIX_PORT")
+                        or next((p for p in ("/var/run/mysqld/mysqld.sock",
+                                             "/run/mysqld/mysqld.sock",
+                                             "/tmp/mysql.sock") if os.path.exists(p)), None))
+                if not sock:
+                    raise
+                conn = mysql.connector.connect(
+                    unix_socket=sock, database=cfg["database"],
+                    user=cfg["user"], password=cfg["password"], connection_timeout=5,
+                )
             db_enums = _load_enum_map_from_db(conn, cfg["database"])
             db_enums.update(enum_map)          # a graph-declared enum overrides the DB
             enum_map = db_enums
