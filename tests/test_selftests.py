@@ -35,6 +35,9 @@ OFFLINE_SELFTEST_MODULES = [
     "field_battery",        # rich multi-case-per-method per-field battery
     "valid_data",           # constraint+name-aware realistic value + FK grounding + guarded AI
     "screenshots",
+    "browser_required_oracle",
+    "browser_combinatorial",
+    "browser_field_validation",
     "ai_assist",
     "vision_gemini",        # Gemini vision field-mapper — offline JSON+chain+429-rotation tests
     "db_seeder",
