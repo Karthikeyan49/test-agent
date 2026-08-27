@@ -167,17 +167,18 @@ def _field_value(field_name: str, spec: Optional[Dict[str, Any]] = None) -> Any:
         base = base or "TestValue"
         mx = spec.get("maxLength")
         return base[:mx] if isinstance(mx, int) and mx > 0 else base
-    name = field_name or ""
-    if _EMAIL_NAME.search(name):
-        return "valid@test.com"
-    if _URL_NAME.search(name):
-        return "https://test.com"
-    if _DATE_NAME.search(name):
-        return "2026-01-01"
-    if _NONNEG_NAME.search(name):
-        return 5
-    base = "Test" + re.sub(r'[^A-Za-z0-9]', '', name)[:12]
-    return base or "TestValue"
+    # No contract spec — synthesize a name-accurate valid value (10-digit phone,
+    # 6-digit pincode, real email/GSTIN, amount/qty/date …) so the generated create
+    # body satisfies strict validators instead of sending "TestValue" everywhere.
+    try:
+        from valid_data import realistic_value
+    except ImportError:
+        from backend.valid_data import realistic_value  # type: ignore
+    try:
+        return realistic_value({"name": field_name or ""})
+    except Exception:
+        base = "Test" + re.sub(r'[^A-Za-z0-9]', '', field_name or "")[:12]
+        return base or "TestValue"
 
 
 def _contracts_by_key(graph_data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

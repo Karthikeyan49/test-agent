@@ -216,6 +216,46 @@ def phase_report(a, outdir):
           "--out", os.path.join(outdir, "consolidated_report.html"),
           "--pdf", os.path.join(outdir, "consolidated_report.pdf")],
          os.path.join(outdir, "report.log"), tee=True)
+    if a.ai:
+        _ai_triage(a, outdir)
+
+
+def _ai_triage(a, outdir):
+    """AI failure-triage (advisory, #2): cluster the top failures by endpoint and ask
+    the model for a likely root cause + fix. Written to AI_TRIAGE.md — never changes a
+    verdict."""
+    try:
+        from ai_provider import AIProvider
+        from ai_assist import explain_failures
+    except Exception as e:
+        log(f"  AI triage unavailable: {e}"); return
+    prov = AIProvider()
+    if not prov.is_enabled():
+        log("  AI triage skipped — provider not enabled (set SYSTEMINTEL_AI_API_KEY)"); return
+    import glob, json as _json
+    from collections import defaultdict
+    fails = defaultdict(list)
+    for f in ([os.path.join(outdir, "api_live", "ledger.jsonl")] +
+              glob.glob(os.path.join(outdir, "*_ledger.jsonl"))):
+        try:
+            for l in open(f):
+                r = _json.loads(l)
+                if r.get("v") == "FAIL":
+                    key = str(r.get("ep", "")).split(" [")[0]
+                    fails[key].append(r)
+        except Exception:
+            pass
+    clusters = sorted(fails.items(), key=lambda kv: -len(kv[1]))[:8]
+    out = ["# AI failure triage (advisory)\n",
+           "_AI proposes a root cause; it never changes a verdict._\n"]
+    for ep, rs in clusters:
+        res = explain_failures(rs, provider=prov)
+        if res:
+            out.append(f"### {ep}  ({len(rs)} failing)\n"
+                       f"- **Root cause:** {res['rootCause']}\n"
+                       f"- **Fix:** {res['suggestedFix']}  _(confidence: {res['confidence']})_\n")
+    open(os.path.join(outdir, "AI_TRIAGE.md"), "w").write("\n".join(out))
+    log(f"  AI triage → {outdir}/AI_TRIAGE.md ({len(clusters)} clusters)")
 
 
 def _run(cmd, logpath, tee=False):
@@ -233,13 +273,12 @@ PHASES = {"api": phase_api, "security": phase_security, "ui": None, "audit": pha
 
 
 def phase_ui(a, outdir):
-    """Browser field battery (full corpus + enum + required + exhaustive combos)."""
-    log("PHASE ui — browser black-box battery")
-    runner = os.path.join(HERE, "browser_campaign.py")
-    if os.path.isfile(runner):
-        _run([sys.executable, runner], os.path.join(outdir, "ui.log"))
-    else:
-        log("  (browser_campaign.py not found in repo — skipping ui phase; run the UI campaign separately)")
+    """Browser field battery — realistic baselines (valid_data) + screenshot-on-fail."""
+    log("PHASE ui — browser black-box battery (+ screenshots on fail)")
+    _run([sys.executable, os.path.join(BACKEND, "ui_runner.py"),
+          "--ui-url", a.ui_url, "--out-dir", outdir,
+          "--user", a.ui_user, "--pass", a.ui_pass, "--shots", "fail",
+          "--rich-max", "0"], os.path.join(outdir, "ui.log"), tee=True)
 PHASES["ui"] = phase_ui
 
 
