@@ -1648,6 +1648,34 @@ def cmd_test(args):
                 print(f"{YELLOW}[!] No --other-token — IDOR/privilege probes will SKIP (they need a non-admin token).{RESET}")
 
             # (a) Injection: every writable request-contract field × {SQLi, XSS}.
+            # Fallback: if the graph carries no request contracts (a scan run
+            # without Phase-1.5 enrichment, or an externally-supplied --graph),
+            # recover them on the fly straight from the controller source —
+            # deterministic, no AI — so injection never silently fires 0 probes.
+            # Source root for on-the-fly contract recovery, first that exists:
+            # the scanned --path; the directory that holds the --graph file (the
+            # graph is usually written inside the repo); the repoPath the graph
+            # recorded at scan time. Lets even a bare --graph run read controllers.
+            _sec_src = None
+            for _cand in (repo_path,
+                          (os.path.dirname(os.path.abspath(args.graph)) if getattr(args, "graph", None) else None),
+                          (_sec_graph.get("repoPath") if isinstance(_sec_graph, dict) else None)):
+                if _cand and os.path.isdir(_cand):
+                    _sec_src = _cand
+                    break
+            if not _sec_graph.get("requestContracts") and _sec_src and os.path.isdir(_sec_src):
+                try:
+                    try:
+                        from endpoint_contracts import build_endpoint_contracts as _bec
+                    except ImportError:                                           # pragma: no cover
+                        from backend.endpoint_contracts import build_endpoint_contracts as _bec  # type: ignore
+                    _built = _bec(_sec_graph, _sec_src, provider=None)
+                    _sec_graph["requestContracts"] = list(_built.values())
+                    print(f"{CYAN}[+] Injection: graph had no contracts — recovered "
+                          f"{len(_built)} from controller source (deterministic).{RESET}")
+                except Exception as _e:
+                    print(f"{YELLOW}[!] Injection: no request contracts and on-the-fly "
+                          f"recovery failed ({type(_e).__name__}); SQLi/XSS will be skipped.{RESET}")
             contracts = [c for c in _sec_graph.get("requestContracts", [])
                          if c.get("method") in ("POST", "PUT", "PATCH") and c.get("fields")]
             print(f"{CYAN}[+] Injection: {len(contracts)} write-endpoint contract(s) with fields{RESET}")

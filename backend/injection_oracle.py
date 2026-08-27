@@ -66,6 +66,20 @@ def _verdict(kind, field, vulnerable, reason, skipped=False):
 def check_sql_injection(endpoint: str, field: str, baseline: Dict[str, Any],
                         run: Callable[[Dict[str, Any]], Dict[str, Any]]) -> Dict[str, Any]:
     """Boolean-differential SQLi probe on one field."""
+    # Baseline-trust probe: send the UNMODIFIED benign body first. If the
+    # endpoint already 5xxs on a clean request, its server errors come from
+    # something other than our payload (a missing backend service, infra, a
+    # broken sibling field), so a later 5xx is NOT attributable to injection.
+    # Establish a clean baseline before trusting the error-based signal — the
+    # same guard the browser layer uses. Prevents false "SQLi" on endpoints
+    # that 5xx for infrastructure reasons (LLM/SMS backend down, etc.).
+    b = run({"type": "API", "endpoint": endpoint,
+             "body": dict(baseline), "authSensitive": True})
+    if b.get("skipped"):
+        return _verdict("sqli", field, None, b.get("skipReason", "auth wall"), skipped=True)
+    sb = b.get("actualStatus")
+    baseline_clean = isinstance(sb, int) and sb < 500
+
     t = run({"type": "API", "endpoint": endpoint,
              "body": {**baseline, field: _SQLI_TRUE}, "authSensitive": True})
     if t.get("skipped"):
@@ -76,10 +90,17 @@ def check_sql_injection(endpoint: str, field: str, baseline: Dict[str, Any],
         return _verdict("sqli", field, None, f.get("skipReason", "auth wall"), skipped=True)
 
     st, sf = t.get("actualStatus"), f.get("actualStatus")
-    # Either probe crashing (5xx) is itself a robustness/error-based signal.
+    # A payload 5xx is an error-based injection signal ONLY when the benign
+    # baseline was clean. If the baseline already 5xxs, the error is not
+    # attributable to the payload → honest SKIP, never a false "vulnerable".
     if (isinstance(st, int) and st >= 500) or (isinstance(sf, int) and sf >= 500):
-        return _verdict("sqli", field, True,
-                        f"server 5xx on a SQLi payload (true={st} false={sf}) — error-based injection signal")
+        if baseline_clean:
+            return _verdict("sqli", field, True,
+                            f"server 5xx on a SQLi payload (true={st} false={sf}) while a benign "
+                            f"baseline was clean ({sb}) — error-based injection signal")
+        return _verdict("sqli", field, None,
+                        f"endpoint 5xx on a benign baseline too (baseline={sb}, true={st} false={sf}) — "
+                        "server error not attributable to injection", skipped=True)
 
     rt, rf = _rowcount(t.get("responseBody")), _rowcount(f.get("responseBody"))
     if rt is not None and rf is not None:
@@ -161,6 +182,24 @@ if __name__ == "__main__":
 
     r = check_sql_injection("POST /search", "q", base, walled)
     assert r["skipped"] is True and r["passed"] is None, r
+
+    # An INFRA-BROKEN endpoint: 5xx on EVERYTHING, including the benign baseline
+    # (e.g. an unreachable LLM/SMS backend). A payload 5xx here is NOT injection —
+    # the baseline-trust guard must SKIP, never report a false "vulnerable".
+    def infra5xx(a):
+        return {"actualStatus": 500, "responseBody": {"message": "Internal server error"}}
+    r = check_sql_injection("POST /otp", "q", base, infra5xx)
+    assert r["skipped"] is True and r["passed"] is None, r
+
+    # A REAL error-based SQLi: benign baseline is clean (200) but a quote in the
+    # payload crashes the query (500). The guard must still flag this.
+    def errbased(a):
+        v = a["body"]["q"]
+        if v in (_SQLI_TRUE, _SQLI_FALSE):
+            return {"actualStatus": 500, "responseBody": {"message": "SQL syntax error"}}
+        return {"actualStatus": 200, "responseBody": {"data": []}}
+    r = check_sql_injection("POST /search", "q", base, errbased)
+    assert r["vulnerable"] is True and r["passed"] is False, r
 
     r = check_reflected_xss("POST /search", "q", base, vulnerable)
     assert r["vulnerable"] is True and r["passed"] is False, r
