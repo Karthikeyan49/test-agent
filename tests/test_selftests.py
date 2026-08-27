@@ -33,6 +33,7 @@ OFFLINE_SELFTEST_MODULES = [
     "mutation",
     "field_blackbox",
     "field_battery",        # rich multi-case-per-method per-field battery
+    "vision_gemini",        # Gemini vision field-mapper — offline JSON+chain+429-rotation tests
     "db_seeder",
     "graph_rag",
     "page_docs",            # skips cleanly without a real graph
