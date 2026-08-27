@@ -186,8 +186,16 @@ fields** (e.g. `product_type`, `payment_mode`) needing real enum members and **F
 fields** (`vendor`, `*_id`) needing references to existing rows, plus 404s
 downstream of those failed creates. Closing these needs live-data-aware body
 building (DB enum columns + real FK ids at generation time) — a defined follow-up,
-not a point fix. The mutation kill-rate (~5.6%) is a related generation-strength
-item (stronger content/row-count oracles) in the same follow-up.
+not a point fix.
+
+**Mutation kill-rate — first increment landed.** A metamorphic `pagination_oracle`
+(default page, param echo, row-bound, clamp) now runs inside the mutation suite and
+kills the pervasive page/limit int-mutation class the status-only checks missed:
+ProductController **2% → 32%** (13/40) with a representative product set seeded.
+Key finding: mutation testing needs data — an empty table makes row-count/limit
+differences unobservable, so the checks fire only once the collection has rows.
+Further gains need per-field content oracles (diminishing returns) and are the
+remaining generation-strength work.
 
 ---
 
