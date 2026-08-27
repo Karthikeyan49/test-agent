@@ -1701,24 +1701,62 @@ def cmd_test(args):
                                       {k: res.get(k) for k in ("technique", "kind", "field", "vulnerable", "reason", "skipped")},
                                       round((time.time() - t0) * 1000), "SEC")
 
-            # (b) IDOR (horizontal): GET endpoints with a {param}; substitute it with 1.
+            # (b) IDOR (horizontal): GET endpoints with a {param}.
+            # To get a real ownership baseline (not a SKIP), resolve each token's
+            # OWN identity id via /auth/me and, for user-scoped resources, probe
+            # that owner's own record — the owner then gets a genuine 2xx and the
+            # oracle can decide PASS/FAIL. Endpoints we can't ground fall back to
+            # id=1 (owner=admin) and SKIP honestly if admin doesn't own it.
+            def _whoami(tok):
+                if not tok:
+                    return None
+                try:
+                    r = _sec_run({"type": "API", "endpoint": "GET /auth/me",
+                                  "authToken": tok, "authSensitive": False})
+                    b = r.get("responseBody")
+                    d = b.get("data") if isinstance(b, dict) else None
+                    d = d if isinstance(d, dict) else (b if isinstance(b, dict) else {})
+                    for k in ("user_id", "id", "userId"):
+                        if d.get(k):
+                            return d.get(k)
+                except Exception:
+                    pass
+                return None
+            admin_id, other_id = _whoami(admin_token), _whoami(other_token)
+            if admin_id or other_id:
+                print(f"{CYAN}[+] IDOR: resolved owner ids (admin={admin_id}, other={other_id}) "
+                      f"for grounded ownership baselines{RESET}")
+
             id_eps = [e for e in _sec_graph.get("apiEndpoints", [])
                       if e.get("method") == "GET" and "{" in (e.get("path", "") or "")]
             print(f"{CYAN}[+] IDOR: {len(id_eps)} resource-id GET endpoint(s){RESET}")
             for e in id_eps:
-                ep = f'GET {_re_sec.sub(r"{[^}]+}", "1", e["path"])}'
-                t0 = time.time()
-                try:
-                    res = check_idor(ep, _sec_run, admin_token, other_token)
-                except Exception as _ex:
-                    _record_extra("Security · Authz · IDOR", f"IDOR: {ep}", "SKIPPED",
-                                  f"err:{type(_ex).__name__}", "securityFinding", None,
+                path = e.get("path", "") or ""
+                user_scoped = bool(_re_sec.search(r"/users?/\{", path)) or "userid" in path.lower()
+                # (substituted-path, owner_token, attacker_token, tag)
+                probes = []
+                if user_scoped:
+                    for _own_tok, _own_id, _atk_tok in ((other_token, other_id, admin_token),
+                                                        (admin_token, admin_id, other_token)):
+                        if _own_id and _own_tok and _atk_tok:
+                            probes.append((_re_sec.sub(r"{[^}]+}", str(_own_id), path),
+                                           _own_tok, _atk_tok, f"owner#{_own_id}"))
+                if not probes:
+                    probes.append((_re_sec.sub(r"{[^}]+}", "1", path), admin_token, other_token, "id=1"))
+                for _spath, _own_tok, _atk_tok, _tag in probes:
+                    ep = f"GET {_spath}"
+                    t0 = time.time()
+                    try:
+                        res = check_idor(ep, _sec_run, _own_tok, _atk_tok)
+                    except Exception as _ex:
+                        _record_extra("Security · Authz · IDOR", f"IDOR: {ep} [{_tag}]", "SKIPPED",
+                                      f"err:{type(_ex).__name__}", "securityFinding", None,
+                                      round((time.time() - t0) * 1000), "SEC")
+                        continue
+                    _record_extra("Security · Authz · IDOR", f"IDOR: {ep} [{_tag}]", _sec_verdict(res),
+                                  res.get("reason", ""), "securityFinding",
+                                  {k: res.get(k) for k in ("technique", "kind", "endpoint", "vulnerable", "reason", "skipped")},
                                   round((time.time() - t0) * 1000), "SEC")
-                    continue
-                _record_extra("Security · Authz · IDOR", f"IDOR: {ep}", _sec_verdict(res),
-                              res.get("reason", ""), "securityFinding",
-                              {k: res.get(k) for k in ("technique", "kind", "endpoint", "vulnerable", "reason", "skipped")},
-                              round((time.time() - t0) * 1000), "SEC")
 
             # (c) Privilege (vertical): /admin/* GET endpoints without a path param.
             adm_eps = [e for e in _sec_graph.get("apiEndpoints", [])
