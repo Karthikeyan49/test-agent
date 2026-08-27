@@ -149,7 +149,7 @@ With the Gemini key supplied via `SYSTEMINTEL_AI_API_KEY` (env only, never writt
 - **`--scenarios-ai`** — AI-designed 3-way scenarios (Gemini `gemini-flash-lite-latest`): 60 executed, all FAIL (same route/FK mismatch as the deterministic scenarios).
 - **`--explore`** — Gemini proposed **8 exploratory edge-case scenarios** grounded on the graph (1,683 total tests generated).
 - **`agent`** subcommand — autonomous **ReAct ran 12 steps** (THOUGHT → READ_FILE OrderController/ProductController, QUERY_GRAPH …), investigating data-integrity gaps.
-- **`vision_gemini`** — browser → screenshot (30 KB) → Gemini vision call executed end-to-end, but returned **HTTP 429 (quota exhausted)** because the concurrent AI runs burned the free-tier quota. Note: `vision_gemini` retries on 429 but does **not** rotate models like `ai_provider` does — a real improvement opportunity.
+- **`vision_gemini`** — browser → screenshot (30 KB) → Gemini vision call executed end-to-end. Initially returned **HTTP 429 (quota exhausted)** because it only retried a single model. **Fixed** (`0521d66`): it now rotates across a vision-capable Gemini model chain on 429 / unavailable-model, matching `ai_provider`; re-verified live → returns a real field mapping (`{"email":"#email","password":"#pw"}`). Offline rotation self-test added; suite 33/33.
 - **Model switching verified:** `ai_provider` rotated across Gemini models under load (`gemini-flash-latest` ↔ `gemini-flash-lite-latest`) — the intended per-model-quota rotation.
 
 ## 4. Bugs found & fixed in the tool (this effort)
